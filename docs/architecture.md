@@ -149,21 +149,43 @@ path is proven good and any remaining fault is on the SD side.
 
 ## Measured performance
 
-| Path | Throughput | Bus |
-|---|---|---|
-| USB read (uncached) | 485 KB/s | SPI @ 20 MHz |
-| USB write | 248 KB/s | SPI @ 20 MHz |
-| Raw SD | ~910 KB/s | SPI @ 20 MHz |
+All measured on an ESP32-S3-DevKitC-1 with a 32 GB SDHC card.
 
-On SDIO 4-bit the same host at the same clock is ~3-4×
-faster — projected 3 200 KB/s read / 2 000 KB/s write / 3 500 KB/s raw
-at 20 MHz (stable on jumper wiring), so a 20 MB print job drops from ~80 s to ~6 s. The SDMMC host
-at 40 MHz can reach ~6 000 KB/s raw on a short breakout; see
-[hardware.md](hardware.md#sdio-clocks--featsdio-projected).
+| Path | SDIO 4-bit @ 40 MHz | SPI @ 20 MHz | Bounded by |
+|---|---|---|---|
+| USB read (uncached) | **1 016 KB/s** | 485 KB/s | USB Full-Speed — at the ceiling |
+| USB write | **~535 KB/s** | 248 KB/s | card program time + FAT metadata |
+| Raw SD (32 KB per command) | **~16 000 KB/s** | ~910 KB/s | the card |
+| Raw SD (one command per sector) | ~1 600 KB/s | — | per-command latency |
+| Wi-Fi upload (web UI) | ~200 KB/s | ~200 KB/s | HTTP multipart path |
+| Wi-Fi download (web UI) | ~500 KB/s | ~500 KB/s | serialised send loop |
 
-On SPI the path is bounded by driving the card in SPI mode rather than
-4-bit SDIO — the card, not the network, is the bottleneck. SDIO
-removes that bound.
+**The card is not the bottleneck, and on SPI it never really was either.**
+Moving from SPI to SDIO raised raw card throughput ~17× (910 → 16 000 KB/s) and
+moved USB read by 3% (485 → 500 KB/s). The wall was always somewhere else. Two
+walls, in fact:
+
+* **USB is Full-Speed.** The ESP32-S3's USB OTG peripheral has no High-Speed
+  PHY; the host negotiates 12 Mbit/s, so ~1.2 MB/s is the hard ceiling for
+  anything crossing USB. Read now sits at 1 016 KB/s, i.e. essentially there.
+  Going faster is a silicon change (the ESP32-P4 has a High-Speed PHY), not a
+  firmware one.
+* **The Wi-Fi paths are bounded in software**, not by the radio or the card:
+  the synchronous `WebServer`'s multipart parser and its 1360-byte blocking
+  send loop. SDIO does not touch either, which is why the web UI numbers did
+  not move.
+
+What *did* move the USB numbers was transfer size. `onRead`/`onWrite` used to
+loop one single-sector SDMMC command per 512 bytes even though TinyUSB hands
+over 4 KB at a time; serving the whole request with one command doubled both
+directions (read 500 → 1 016 KB/s, write 258 → ~535 KB/s). Per-command latency,
+not bandwidth, was the cost.
+
+Pinning storage work to a dedicated core was measured and does **not** help:
+throughput moves under 2% when the same core is saturated, and 74–89% of that
+core is idle during SD I/O — the transfers are DMA/latency-bound, not
+CPU-bound. See `pio run -e core_sdio` and
+[hardware.md](hardware.md#sdio-clocks).
 
 Verified end to end over USB: a 2 MB write survives a SHA-256 round trip
 (`6EA73B45…C562` identical both sides), and the ESP32's own directory listing
