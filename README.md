@@ -38,19 +38,33 @@ Working on hardware: the card enumerates as a USB drive, the web UI serves from
 LittleFS, and files uploaded over Wi-Fi appear to the USB host without a
 reboot.
 
+All figures below are **measured on hardware** — an ESP32-S3-DevKitC-1 with a
+32 GB SDHC card on a 3.3 V-native breakout, SDIO 4-bit at 40 MHz.
+
 | Measurement | Value | Notes |
 |---|---|---|
-| Read (USB, uncached) — SPI | 485 KB/s | 4-wire SPI @ 20 MHz |
-| Write (USB) — SPI | 248 KB/s | card is the bottleneck |
-| Read (USB, uncached) — SDIO 4-bit | ~3 200 KB/s * | SDIO @ 20 MHz, projected — ~6× SPI (~6 000 KB/s raw at 40 MHz on short wiring) |
-| Write (USB) — SDIO 4-bit | ~2 000 KB/s * | same wiring, 6 wires (~3 500 KB/s at 40 MHz) |
-| Raw SD throughput — SDIO | ~3 500 KB/s * | vs ~910 KB/s SPI — 20 MB in ~6 s not ~80 s (~6 000 KB/s at 40 MHz) |
+| Read (USB, uncached) — SDIO 4-bit | **1 016 KB/s** | at the USB Full-Speed ceiling |
+| Write (USB) — SDIO 4-bit | **~535 KB/s** | |
+| Read (USB, uncached) — SPI | 485 KB/s | 4-wire SPI @ 20 MHz, for comparison |
+| Write (USB) — SPI | 248 KB/s | |
+| Upload over Wi-Fi (web UI) | ~200 KB/s | bounded by the HTTP path, not the card |
+| Download over Wi-Fi (web UI) | ~500 KB/s | same |
+| Raw SD — SDIO 4-bit @ 40 MHz | ~16 000 KB/s | 32 KB per command (~1 600 KB/s at one command per sector) |
+| Raw SD — SPI @ 20 MHz | ~910 KB/s | |
+| USB link | Full Speed, 12 Mbit/s | **~1.2 MB/s hard ceiling** — the ESP32-S3 has no High-Speed PHY |
+| SD clock — SDIO | 40 MHz, 4-bit | only 40 and 20 MHz are usable, see [hardware.md](docs/hardware.md#sdio-clocks) |
 | SD clock — SPI | 20 MHz (verified clean to 25 MHz) | legacy bus |
-| SD clock — SDIO | 20 MHz stable (40 MHz with short wiring) | SDMMC host, 4-bit |
 | Web UI size | 62 KB, served from LittleFS | |
 | Card tested | 32 GB SDHC, FAT32 | |
 
-\* SPI figures are bench-measured; SDIO figures are projected from the SDMMC host at 20 MHz / 4-bit (stable on jumper wiring, 40 MHz with short wiring). Re-measure after wiring the 6-wire breakout.
+**What actually bounds this.** The card is not the bottleneck on any path — it
+has roughly 16 MB/s available and nothing uses more than a fraction of it.
+USB transfers are bounded by the ESP32-S3's **USB Full-Speed** peripheral
+(12 Mbit/s ≈ 1.2 MB/s); reads already sit at that ceiling, so faster USB needs
+different silicon, not firmware. The Wi-Fi figures are bounded by the HTTP
+upload/download path in software. Earlier versions of this table carried
+projected SDIO figures of ~3 200 KB/s read and ~2 000 KB/s write; those were
+never achievable over USB Full-Speed and have been replaced with measurements.
 
 ## How the USB and Wi-Fi sides coexist
 
@@ -161,8 +175,12 @@ add a DNS rewrite from e.g. `printdrop.office.lan` to the reserved address.
 ## Using it
 
 - **Upload** — drag files anywhere onto the page, or use *Choose files*.
-  Progress, transfer rate and ETA are shown per file. 20 MB takes ~80 s over SPI,
-  ~6 s over SDIO 4-bit at 20 MHz (~4 s at 40 MHz) — the card, not the network, is the bottleneck.
+  Progress is shown per file. A 20 MB job takes roughly **100 s** over Wi-Fi at
+  the current ~200 KB/s; copying the same file over USB takes ~37 s, and the
+  printer reads it back at ~1 016 KB/s. The limit is the HTTP path in firmware,
+  not the card and not the network.
+  (The per-file rate and ETA in the UI are currently unreliable — they time only
+  the card write, not the transfer. See [bugs.md](docs/bugs.md).)
 - **Browse** — grid or list view, sorted by name or size, with folder
   navigation. Print jobs get their own icon colour so they stand out.
 - **Eject / refresh printer view** — forces the printer to re-read the card.

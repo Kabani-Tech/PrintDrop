@@ -1,17 +1,27 @@
-# SDIO 4-bit — `feat/sdio`
+# SDIO 4-bit
 
-This branch migrates PrintDrop from the legacy 4-wire **SPI** SD driver
-to the ESP32-S3's native **SDMMC host in 4-bit SDIO mode**.
+PrintDrop drives the card through the ESP32-S3's native **SDMMC host in 4-bit
+SDIO mode**, rather than the legacy 4-wire **SPI** driver.
 
 ## Why
 
-The SPI path caps at ~910 KB/s raw, 485 KB/s USB read, 248 KB/s USB write.
-A 20 MB `gcode` takes ~80 s to upload — the card, not Wi-Fi, is the bottleneck.
-The same card on the same breakout at the same 20 MHz in SDIO 4-bit sustains
-~3 500 KB/s raw, ~3 200 KB/s USB read, ~2 000 KB/s USB write; the same job
-lands in ~6 s. At 40 MHz the SDHC high-speed ceiling is ~6 MB/s raw.
+SPI caps at ~910 KB/s raw. SDIO 4-bit at 40 MHz measures **~16 000 KB/s** raw
+on the same card and breakout — roughly 17× the bus bandwidth.
 
-See [`docs/hardware.md`](hardware.md#sdio-clocks--featsdio-projected) for the
+What that bought end-to-end is more modest, and the reason is worth stating
+plainly: **the card was never the bottleneck.** USB read went 485 → 500 KB/s on
+the bus change alone. The real gains came afterwards, from issuing one SDMMC
+command per MSC request instead of one per 512-byte sector (read 500 →
+1 016 KB/s, write 258 → ~535 KB/s), and reads now sit at the ESP32-S3's USB
+Full-Speed ceiling of ~1.2 MB/s.
+
+The Wi-Fi upload and download paths are unchanged by any of this (~200 and
+~500 KB/s); they are bounded by the synchronous `WebServer` in firmware.
+
+Headroom on the card is therefore large and mostly unused — which is a good
+position to be in, but it does mean SDIO is not a throughput fix on its own.
+
+See [`docs/hardware.md`](hardware.md#sdio-clocks) for the
 sweep and [`docs/architecture.md`](architecture.md#measured-performance) for the
 bottleneck note.
 
@@ -40,8 +50,9 @@ pull-ups are weaker and not sufficient for SDIO. Bring-up can use 1-bit mode
 
 ```
 # feat/sdio — SDIO is the default
-pio run -e printdrop        # SDIO 4-bit @ 40 MHz (falls back automatically)
-pio run -e diag_sdio        # SDIO bus width + throughput sweep
+pio run -e printdrop        # SDIO 4-bit @ 40 MHz
+pio run -e bench_sdio       # SDIO bus width + clock + throughput sweep
+pio run -e core_sdio        # is SD work CPU-bound or DMA-bound?
 
 # legacy — SPI without re-wiring
 pio run -e printdrop_spi    # SPI @ 20 MHz
@@ -89,30 +100,38 @@ pio run -e diag             # SPI speed sweep
 * `[env]` adds the six SDIO pin definitions.
 * `[env:printdrop]` defines `USE_SDIO` + `SDMMC_WIDTH=4` (now SDIO).
 * `[env:printdrop_spi]` is the SPI legacy snapshot (`ARDUINO_USB_MODE=0`).
-* `[env:diag_sdio]` is the SDIO bring-up environment.
+* `[env:bench_sdio]` sweeps bus width, clock and throughput.
+* `[env:core_sdio]` tests whether a dedicated storage core would help.
+* `[env:diag_sdio]` predates both and is **misleading**: it builds
+  `src/diag/sd_diag.cpp`, which is SPI-only, so its `-D USE_SDIO` has no effect
+  and it never touches the SDMMC host. Use `bench_sdio`.
 
-## Website
+## Known SDMMC hazards
 
-`website/src/app/page.tsx` on this branch shows SDIO figures (3 200/2 000 KB/s,
-~6 s for 20 MB) and a **This branch** note; the SPI figures remain in the
-paragraph as the `main` baseline and in `hardware.md`. After merge to `main`,
-the site will ship the same numbers.
+Only **40 MHz and 20 MHz** are usable. Every other clock either runs at
+~192 KB/s while reporting the requested frequency, or aborts the boot outright.
+Both failure modes and their measurements are documented in
+[`hardware.md`](hardware.md#sdio-clocks). The lower rungs of `mountCard()`'s
+frequency ladder (10 / 4 / 1 MHz) are affected and have not yet been removed.
 
 ## Testing plan
 
-1. `pio run -e diag_sdio -t upload` — verify the probe passes at 20 MHz 1-bit
-   before wiring D1-D3, then at 20 MHz 4-bit, then at 40 MHz 4-bit.
-2. `pio run -e printdrop -t upload` — check `SD bus: SDIO 4-bit ...` banner,
-   `status` command, and that the card enumerates.
-3. Upload 20 MB `benchy.gcode` via `http://printdrop.local` — expect ~6 s not
-   ~80 s; verify SHA-256 on the printer host matches.
-4. During upload, confirm the printer's file list withdraws and reappears
+1. `pio run -e bench_sdio -t upload` — verify the probe passes at 20 MHz 1-bit
+   before wiring D1-D3, then at 20 MHz 4-bit, then at 40 MHz 4-bit, and check
+   the throughput sweep against the table in `hardware.md`.
+2. `pio run -e printdrop -t upload` — check the `SD bus: SDIO 4-bit ...`
+   banner, the `status` command, and that the card enumerates.
+3. Copy a large file to the mounted volume over USB and read it back; verify
+   SHA-256 matches. Expect ~1 016 KB/s read and ~535 KB/s write.
+4. Upload the same file via `http://printdrop.local` — expect ~200 KB/s, i.e.
+   ~100 s for 20 MB. This path is bounded by the HTTP stack, not the card.
+5. During upload, confirm the printer's file list withdraws and reappears
    without a reboot, and that a concurrent USB read does not stall (short mutex
    timeout).
-5. `pio run -e printdrop_spi` — regression: SPI still enumerates on the same
+6. `pio run -e printdrop_spi` — regression: SPI still enumerates on the same
    hardware with only the four original wires.
 
 ## Rollback
 
-SPI is not removed. `pio run -e printdrop_spi` builds the `main` driver
-without re-wiring, and `git checkout main` restores the SPI-default branch.
+SPI is not removed. `pio run -e printdrop_spi` builds the legacy driver
+without re-wiring.
