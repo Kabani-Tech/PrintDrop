@@ -18,15 +18,19 @@ public:
     sdmmc_card_t* getCard() { return _card; }
 };
 #define SD_MMC_CARD (reinterpret_cast<SDMMCHack*>(&SD_MMC)->getCard())
-inline bool sdioReadRAW(uint8_t* buf, uint32_t sector) {
+// One SDMMC command per call, however many sectors. Issuing a command per
+// 512-byte sector costs ~10x: measured 1.6 MB/s single-sector vs 16 MB/s at
+// 32 KB per command on the same bus. The IDF bounces the buffer internally if
+// it is not DMA-capable or word-aligned, so callers need not pre-align.
+inline bool sdioReadRAW(uint8_t* buf, uint32_t sector, uint32_t count = 1) {
     sdmmc_card_t* c = SD_MMC_CARD;
     if (!c) return false;
-    return sdmmc_read_sectors(c, buf, sector, 1) == ESP_OK;
+    return sdmmc_read_sectors(c, buf, sector, count) == ESP_OK;
 }
-inline bool sdioWriteRAW(uint8_t* buf, uint32_t sector) {
+inline bool sdioWriteRAW(uint8_t* buf, uint32_t sector, uint32_t count = 1) {
     sdmmc_card_t* c = SD_MMC_CARD;
     if (!c) return false;
-    return sdmmc_write_sectors(c, buf, sector, 1) == ESP_OK;
+    return sdmmc_write_sectors(c, buf, sector, count) == ESP_OK;
 }
 #else
 #include <SPI.h>
@@ -217,16 +221,21 @@ int32_t onRead(uint32_t lba, uint32_t offset, void* buffer, uint32_t bufsize) {
     if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(kMscLockTimeoutMs)) != pdTRUE) return -1;
     led::setActivity(true);
     int32_t result = bufsize;
-    for (uint32_t i = 0; i < count; ++i) {
 #ifdef USE_SDIO
-        if (!sdioReadRAW(reinterpret_cast<uint8_t*>(buffer) + i * secSize, lba + i)) {
+    // The host asks for up to CONFIG_TINYUSB_MSC_BUFSIZE (4 KB = 8 sectors) at
+    // a time; serve it with a single command.
+    if (!sdioReadRAW(reinterpret_cast<uint8_t*>(buffer), lba, count)) {
+        result = -1;
+    }
 #else
+    // SDFS exposes only single-sector access, so the SPI path keeps the loop.
+    for (uint32_t i = 0; i < count; ++i) {
         if (!SD.readRAW(reinterpret_cast<uint8_t*>(buffer) + i * secSize, lba + i)) {
-#endif
             result = -1;
             break;
         }
     }
+#endif
     led::setActivity(false);
     xSemaphoreGive(sdMutex);
     return result;
@@ -241,16 +250,20 @@ int32_t onWrite(uint32_t lba, uint32_t offset, uint8_t* buffer, uint32_t bufsize
     if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(kMscLockTimeoutMs)) != pdTRUE) return -1;
     led::setActivity(true);
     int32_t result = bufsize;
-    for (uint32_t i = 0; i < count; ++i) {
 #ifdef USE_SDIO
-        if (!sdioWriteRAW(buffer + i * secSize, lba + i)) {
+    // One multi-sector write is also one card program cycle, rather than `count`
+    // of them -- this matters more on writes than on reads.
+    if (!sdioWriteRAW(buffer, lba, count)) {
+        result = -1;
+    }
 #else
+    for (uint32_t i = 0; i < count; ++i) {
         if (!SD.writeRAW(buffer + i * secSize, lba + i)) {
-#endif
             result = -1;
             break;
         }
     }
+#endif
     // Our cached FATFS view is now suspect regardless of success.
     hostWrote = true;
     led::setActivity(false);

@@ -31,10 +31,10 @@ import { Separator } from "@/components/ui/separator"
 const GITHUB_URL = "https://github.com/Kabani-Tech/PrintDrop"
 
 const STATS = [
-  { value: "~3 200", label: "KB/s card read — SDIO" },
-  { value: "~2 000", label: "KB/s card write — SDIO" },
+  { value: "1 016", label: "KB/s read over USB — measured" },
+  { value: "~535", label: "KB/s write over USB — measured" },
   { value: "62", label: "KB web UI, self-hosted" },
-  { value: "~6 s", label: "20 MB job — SDIO (was ~80 s SPI)" },
+  { value: "~16 MB/s", label: "raw card throughput — SDIO 4-bit" },
 ]
 
 const FEATURES = [
@@ -264,7 +264,7 @@ export default function Home() {
                   <div>
                     <p className="text-sm font-medium">benchy.gcode</p>
                     <p className="mt-1 text-sm text-muted-foreground">
-                      20 MB · uploaded at ~2 000 KB/s · SDIO 4-bit
+                      20 MB · read by the printer at ~1 016 KB/s
                     </p>
                   </div>
                   <Badge variant="outline" className="ml-auto">
@@ -294,13 +294,22 @@ export default function Home() {
           ))}
         </div>
         <p className="mt-4 text-sm text-muted-foreground">
-          <span className="font-medium text-foreground">SDIO 4-bit</span> — at
-          20 MHz (stable on jumper wiring) delivers ~3 500 KB/s raw, ~3 200
-          KB/s USB read and ~2 000 KB/s USB write — a 20 MB job lands in ~6 s
-          instead of ~80 s on SPI (485 KB/s read / 248 KB/s write). SDIO 4-bit
-          at 40 MHz reaches ~6 000 KB/s raw on short wiring. The old SPI path
-          remains available as <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">-e printdrop_spi</code>.
-          The card, not the network, was the limit — SDIO removes it.
+          <span className="font-medium text-foreground">All measured on hardware</span>{" "}
+          — an ESP32-S3 with a 32&nbsp;GB SDHC card on SDIO 4-bit at 40&nbsp;MHz.
+          The card sustains ~16&nbsp;MB/s raw, against ~910&nbsp;KB/s on the old
+          SPI wiring. Over USB the device reads at 1&nbsp;016&nbsp;KB/s and
+          writes at ~535&nbsp;KB/s (SPI managed 485 / 248).
+        </p>
+        <p className="mt-3 text-sm text-muted-foreground">
+          Reads are now at the ceiling of the ESP32-S3&apos;s{" "}
+          <span className="font-medium text-foreground">USB Full-Speed</span>{" "}
+          peripheral — 12&nbsp;Mbit/s, about 1.2&nbsp;MB/s — so the card has
+          plenty of headroom to spare and further USB gains would need different
+          silicon rather than different firmware. Uploads over Wi-Fi run at
+          ~200&nbsp;KB/s and downloads at ~500&nbsp;KB/s, bounded by the HTTP
+          path in firmware rather than by the card or the radio. The old SPI
+          driver remains available as{" "}
+          <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">-e printdrop_spi</code>.
         </p>
       </section>
 

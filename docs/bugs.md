@@ -257,3 +257,73 @@ runs that whole sequence at whatever frequency it is handed.
 stepping down a ladder (20 → 10 → 4 → 1 MHz) and verifying the MBR signature at
 each rung before trusting the link — a marginal clock mounts fine and then
 serves corrupt sectors.
+
+## SDIO: only 40 MHz and 20 MHz actually work
+
+Found with `pio run -e bench_sdio` while re-measuring the SDIO claims.
+
+`mountCard()` walks a frequency ladder (`SDMMC_FREQ` → 20 → 10 → 4 → 1 MHz),
+mounting at each rung and verifying sector 0's `55 AA` signature before
+trusting it. That check passes at every rung. The throughput does not:
+
+```
+requested  40000 kHz -> host  40000 kHz : 15887 KB/s
+requested  20000 kHz -> host  20000 kHz :  8886 KB/s
+requested  16000 kHz -> host  16000 kHz :   192 KB/s
+requested  10000 kHz -> host  10000 kHz :   192 KB/s
+requested   8000 kHz -> host   8000 kHz :   192 KB/s
+requested   4000 kHz -> host   4000 kHz :   192 KB/s
+```
+
+Every clock below 20 MHz delivers a flat **~192 KB/s** — precisely what 4-bit
+at the 400 kHz probe clock would give — while `card->max_freq_khz` cheerfully
+reports the frequency that was asked for. It is not clock-proportional: 16 MHz
+and 4 MHz are identical, so this is a fixed fallback, not a slow bus.
+
+**Consequence:** if 40 and 20 MHz ever fail the probe, the ladder silently
+settles on a rung that runs **~2.5× slower than the SPI driver it replaced**,
+while logging `[sd] SDIO 4-bit mounted at 10000000 Hz`. The lower rungs are
+worse than useless — a hard failure would be more honest.
+
+**Not yet fixed.** The ladder should stop at 20 MHz.
+
+### Non-divisor clocks abort the boot
+
+Related, and sharper. The SDMMC source clock is 160 MHz, and requesting a
+frequency that is not an exact divisor makes the host round *up*, which trips
+an assertion inside the IDF:
+
+```
+assert failed: sdmmc_init_host_frequency sdmmc_common.c:198
+  (card->max_freq_khz <= card->host.max_freq_khz)
+```
+
+That panics and boot-loops the board. Both 25 MHz and 32 MHz do it. Since
+`SDMMC_FREQ` is a build flag, setting it to `25000000` — which looks entirely
+reasonable, and is this card's own advertised `tr_speed` — produces a device
+that cannot boot until it is reflashed.
+
+## Web UI: the upload rate and ETA are wrong
+
+`web.cpp` computes the per-chunk transfer rate like this:
+
+```cpp
+uint32_t t0 = millis();
+if (uploadFile.write(up.buf, up.currentSize) != up.currentSize) {
+    ...
+} else {
+    uint32_t elapsed = millis() - t0 + 1;
+    uint32_t rate = up.currentSize * 1000 / elapsed;
+```
+
+`t0` is taken immediately before the **card write**, so `elapsed` measures only
+how long the SD write took — typically 0–1 ms for a 1436-byte chunk. It does
+not include the network transfer, which is where essentially all of the time
+actually goes.
+
+The reported rate is therefore roughly the card's write speed (~1.4 MB/s)
+rather than the upload's real throughput (~200 KB/s) — off by an order of
+magnitude — and the ETA derived from it is wrong by the same factor.
+
+**Not yet fixed.** The rate should be measured across the whole upload, from
+`UPLOAD_FILE_START`, not per chunk around the write call.

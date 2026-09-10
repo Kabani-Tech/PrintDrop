@@ -111,24 +111,61 @@ Every speed verified clean; throughput saturates around 20 MHz at ~910 KB/s.
 identified slowly before the clock is raised, regardless of what it sustains
 afterwards.
 
-## SDIO clocks — `feat/sdio` (projected)
+## SDIO clocks
 
-The `diag_sdio` environment sweeps the SDMMC host at 10/20/40 MHz in both 1-bit
-and 4-bit modes, verifying each step with the same sector-0 probe. On jumper
-wiring the ESP32-S3 SDMMC host sustains 20 MHz cleanly; 40 MHz wants short,
-equal-length wires and solid pull-ups. Expected deltas over SPI:
+Measured with `pio run -e bench_sdio`, on a 32 GB SDHC card (WX32G) on jumper
+wiring. Each mount is verified against a reference read of sector 0 before its
+numbers are believed, and every measurement reads a fresh region so the card's
+read-ahead cannot inflate it.
 
-| Bus | Clock | Raw SD | USB read | USB write | 20 MB upload |
-|-----|-------|--------|----------|-----------|--------------|
-| SPI 1-bit | 20 MHz | ~910 KB/s | 485 KB/s | 248 KB/s | ~80 s |
-| SDIO 1-bit | 20 MHz | ~1 800 KB/s | ~1 200 KB/s | ~900 KB/s | ~22 s |
-| **SDIO 4-bit** | **20 MHz** | **~3 500 KB/s** | **~3 200 KB/s** | **~2 000 KB/s** | **~6 s** |
-| SDIO 4-bit | 40 MHz | ~6 000 KB/s | ~5 000 KB/s * | ~3 500 KB/s * | ~4 s |
+Raw SD throughput, by bus width and clock:
 
-\* SDIO 4-bit @ 40 MHz is the SDHC high-speed ceiling — jumper wires may need to stay at 20 MHz. Re-measure after wiring. `SDMMC_FREQ` defaults to 40 MHz; step down to 20 MHz if the probe fails.
+| Bus | Clock | Raw SD, 32 KB per command | Raw SD, one command per sector |
+|-----|-------|---------------------------|--------------------------------|
+| SPI 1-bit | 20 MHz | ~910 KB/s | — |
+| SDIO 1-bit | 20 MHz | 2 411 KB/s | 1 027 KB/s |
+| SDIO 4-bit | 20 MHz | 8 886–8 924 KB/s | 1 450–1 500 KB/s |
+| **SDIO 4-bit** | **40 MHz** | **15 887–16 194 KB/s** | **1 586–1 651 KB/s** |
 
-1-bit SDIO is already ~2× SPI and useful for bring-up (only CLK/CMD/D0 needed);
-4-bit multiplies that by ~4. See [architecture.md](architecture.md#measured-performance) for the bottleneck note.
+The two right-hand columns are the same bus doing the same work; the only
+difference is how many sectors each SDMMC command carries. That ~10× gap is why
+`onRead`/`onWrite` serve a whole MSC request with one command.
+
+End-to-end, with SDIO 4-bit at 40 MHz:
+
+| Path | Throughput | Bounded by |
+|------|-----------|------------|
+| USB read (uncached) | 1 016 KB/s | USB Full-Speed — at the ceiling |
+| USB write | ~535 KB/s | card program time + FAT metadata |
+| Wi-Fi upload (web UI) | ~200 KB/s | HTTP multipart path in firmware |
+| Wi-Fi download (web UI) | ~500 KB/s | 1360-byte serialised send loop |
+
+The card is not the limiting factor on any of these. USB is capped by the
+ESP32-S3's Full-Speed peripheral (12 Mbit/s ≈ 1.2 MB/s); the Wi-Fi paths are
+capped in software. See [architecture.md](architecture.md#measured-performance).
+
+### Two SDMMC hazards
+
+Both were found by the sweep and both still apply:
+
+**Only 40 MHz and 20 MHz are usable.** Requesting 16, 10, 8 or 4 MHz produces a
+flat **~192 KB/s** — what 4-bit at the 400 kHz probe clock would give — while
+`card->max_freq_khz` reports the clock you asked for. The sector-0 probe still
+passes, so `mountCard()` accepts the rung and logs `mounted at 10000000 Hz`
+while running ~2.5× slower than the SPI driver it replaced. The lower rungs of
+the frequency ladder are therefore worse than useless.
+
+**Non-divisors of the 160 MHz source clock abort the boot.** Requesting 25 MHz
+or 32 MHz trips an assertion inside the IDF:
+
+```
+assert failed: sdmmc_init_host_frequency sdmmc_common.c:198
+  (card->max_freq_khz <= card->host.max_freq_khz)
+```
+
+which panics and boot-loops the board. `SDMMC_FREQ` is a build flag, so setting
+it to `25000000` — this card's own advertised `tr_speed` — makes the device
+unbootable until it is reflashed. Stick to 40 MHz or 20 MHz.
 
 ## LED and button — `feat/ux`
 
