@@ -355,7 +355,39 @@ void handleDownload() {
     String name = path.substring(path.lastIndexOf('/') + 1);
     sendCorsHeaders();
     server.sendHeader("Content-Disposition", "attachment; filename=\"" + name + "\"");
-    server.streamFile(f, "application/octet-stream");
+
+    // Deliberately not server.streamFile(): it hands the File to
+    // WiFiClient::write(Stream&), which loops `while (stream.available())` and
+    // never checks whether readBytes() actually returned anything. A file whose
+    // cluster chain is damaged reads 0 bytes forever, available() never falls,
+    // and the loop spins on loopTask -- which takes the web server AND the
+    // serial console down until someone power-cycles the board. Reproduced
+    // three times; see docs/bugs.md. Send it ourselves so a failed read ends
+    // the response instead.
+    const size_t total = f.size();
+    server.setContentLength(total);
+    server.send(200, "application/octet-stream", "");
+
+    uint8_t  buf[1024];
+    size_t   sent = 0;
+    while (sent < total) {
+        if (!server.client().connected()) {
+            log("[web] download of %s abandoned by the client at %u/%u bytes",
+                path.c_str(), (unsigned)sent, (unsigned)total);
+            break;
+        }
+        const size_t want = (total - sent) < sizeof(buf) ? (total - sent) : sizeof(buf);
+        const int    got  = f.read(buf, want);
+        if (got <= 0) {
+            // Short body against a declared Content-Length: the client reports a
+            // truncated transfer, which is what we want it to see.
+            log("[web] read failed on %s at %u/%u bytes, truncating the response",
+                path.c_str(), (unsigned)sent, (unsigned)total);
+            break;
+        }
+        server.sendContent(reinterpret_cast<const char*>(buf), (size_t)got);
+        sent += (size_t)got;
+    }
     f.close();
 }
 
@@ -363,6 +395,15 @@ void handleEject() {
     if (!requireAuth()) return;
     storage::refreshHostView();
     sendOk();
+}
+
+// Recovery hatch: once a host has ejected the media it keeps ejecting it, and
+// re-presenting the media does not change its mind. Leaving the bus entirely
+// does, and that is the only way back short of unplugging the cable.
+void handleReattach() {
+    if (!requireAuth()) return;
+    sendOk();               // answer first; the detach takes the drive away
+    storage::reattachHost();
 }
 
 // --- API: upload -----------------------------------------------------------
@@ -579,6 +620,13 @@ void handleOtaUploadData() {
     HTTPUpload& up = server.upload();
     if (up.status == UPLOAD_FILE_START) {
         otaError = "";
+        // Check credentials here, not only in handleOtaUploadDone: the data
+        // callbacks run first, so an unauthenticated POST would otherwise write
+        // a whole image into the OTA partition before being turned away.
+        if (auth::isRequired() && !auth::checkBasicAuth(server.header("Authorization"))) {
+            otaError = "Authentication required";
+            return;
+        }
         String err;
         size_t total = server.header("Content-Length").toInt();
         // WebServer doesn't give total easily; use UPDATE_SIZE_UNKNOWN if 0
@@ -617,6 +665,7 @@ bool begin() {
     server.on("/api/mkdir",     HTTP_POST, handleMkdir);
     server.on("/api/rename",    HTTP_POST, handleRename);
     server.on("/api/eject",     HTTP_POST, handleEject);
+    server.on("/api/usb/reattach", HTTP_POST, handleReattach);
     server.on("/api/wifi/scan", HTTP_GET,  handleWifiScan);
     server.on("/api/wifi",      HTTP_POST, handleWifiSave);
     server.on("/api/upload",    HTTP_POST, handleUploadDone, handleUploadData);
