@@ -453,3 +453,40 @@ Backtrace: 0x400511b1 0x40049185 0x400491e5 0x40043917 ...
 
 **Not yet fixed.** `POST /api/ota` works and needs no buttons, so that is the
 supported way to reflash a board whose USB is in MSC mode.
+
+## SD: the card stops answering, and nothing noticed
+
+Seen three times in one session on the same board, wiring untouched between
+runs. Two shapes:
+
+```
+E (1474) sdmmc_common: sdmmc_init_ocr: send_op_cond (1) returned 0x107
+[sd] SDIO mount failed at all frequencies              <- at boot
+```
+```
+[sd] SDIO 4-bit mounted at 40000000 Hz, 62333952 sectors
+E (3007) sdmmc_cmd: sdmmc_read_sectors_dma: sdmmc_send_cmd returned 0x107
+                                                        <- mounted, then dead
+```
+
+The second is the worse one: the single-sector probe at mount passes, so the
+card is declared healthy, and then every transfer times out. `status` reported
+`card: mounted` while the USB host was getting nothing but errors.
+
+Neither recovered on its own. A mount that failed at boot meant USB never
+started, so the drive never appeared and a reboot was the only way to try again
+— and a warm reboot does not power-cycle the card, so it usually failed too. It
+took a physical reseat.
+
+The cause is below the firmware — a marginal card or connection — but the
+handling was wrong in three ways, all now fixed:
+
+- **Failures are counted.** `SD_FAULT_THRESHOLD` consecutive failed transfers
+  mark the bus faulted; `poll()` then drops the mount rather than continuing to
+  claim the card is fine.
+- **Mounts are retried.** `poll()` re-probes, and starts USB if the card only
+  turned up after boot, so the drive appears without a reboot.
+- **Retrying does not stall everything else.** The full ladder takes ~4.5 s of
+  timeouts to walk, on `loopTask`, which took every HTTP request with it:
+  measured 4.6 s per `/api/status` against 30 ms once the retry used a
+  single-rung probe with exponential backoff to a minute.

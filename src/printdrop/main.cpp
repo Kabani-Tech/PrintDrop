@@ -225,6 +225,7 @@ void setup() {
         Serial.println("[sd] Check CS/MISO/MOSI/CLK against the pins above.");
 #endif
         led::setError(true);
+        Serial.println("[sd] will keep retrying; the drive appears when a card answers.");
     } else {
         // Quick SD OTA check at boot (no block)
         String v;
@@ -247,6 +248,7 @@ void setup() {
 }
 
 void loop() {
+    storage::poll();
     web::loop();
     net::loop();
     led::loop();

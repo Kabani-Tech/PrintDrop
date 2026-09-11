@@ -21,6 +21,10 @@
 namespace storage {
 
 bool begin();
+// Call from loop(). Retries a card that was absent or has stopped answering,
+// and starts USB if the card only turned up after boot. Without it, a card
+// that fails at any point stays failed until the board is power-cycled.
+void poll();
 bool cardMounted();
 
 uint64_t totalBytes();

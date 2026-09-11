@@ -135,6 +135,20 @@
 #define USB_READ_ONLY 1
 #endif
 
+// How many consecutive failed transfers mean the card has stopped answering
+// rather than hiccuped, and how often to retry a mount once it has.
+#ifndef SD_FAULT_THRESHOLD
+#define SD_FAULT_THRESHOLD 8
+#endif
+#ifndef SD_REMOUNT_INTERVAL_MS
+#define SD_REMOUNT_INTERVAL_MS 5000
+#endif
+// Retries back off to this, so a board with no card does not spend loopTask on
+// the SDMMC host and leave the web UI crawling.
+#ifndef SD_REMOUNT_MAX_MS
+#define SD_REMOUNT_MAX_MS 60000
+#endif
+
 // ---------------------------------------------------------------------------
 // Web UI authentication (feat/ux)
 // ---------------------------------------------------------------------------
