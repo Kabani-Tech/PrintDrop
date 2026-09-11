@@ -9,6 +9,7 @@ does nothing — so each is written up with the evidence that identified it.
 - [SD: the card was invisible](#sd-the-card-was-invisible)
 - [SD: cards must be identified at 400 kHz](#sd-cards-must-be-identified-at-400-khz)
 - [USB: the host keeps a stale FAT, and wins](#usb-the-host-keeps-a-stale-fat-and-wins)
+- [SD: the card stops answering, and nothing noticed](#sd-the-card-stops-answering-and-nothing-noticed)
 
 ---
 
