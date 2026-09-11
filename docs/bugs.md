@@ -305,6 +305,12 @@ That panics and boot-loops the board. Both 25 MHz and 32 MHz do it. Since
 reasonable, and is this card's own advertised `tr_speed` — produces a device
 that cannot boot until it is reflashed.
 
+**Now guarded at build time.** `config.h` rejects any `SDMMC_FREQ` outside the
+set measured to work — 40, 20, 10, 4 and 1 MHz — with an `#error` naming the
+consequence, so an unbootable board cannot be built by accident. Extend the list
+from a `bench_sdio` run, or define `SDMMC_FREQ_UNCHECKED` to take responsibility
+for a value yourself.
+
 ## Web UI: the upload rate and ETA are wrong
 
 `web.cpp` computes the per-chunk transfer rate like this:

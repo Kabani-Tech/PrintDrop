@@ -71,6 +71,27 @@
 #define SDMMC_FREQ 40000000
 #endif
 
+// Not every plausible frequency is survivable. The SDMMC host rounds a request
+// it cannot divide to exactly, and when the result exceeds what the card
+// advertises the IDF aborts inside sdmmc_init_host_frequency:
+//
+//   assert failed: sdmmc_init_host_frequency sdmmc_common.c:198
+//   (card->max_freq_khz <= card->host.max_freq_khz)
+//
+// That is a boot loop, and since SDMMC_FREQ is a build flag the board cannot be
+// talked out of it -- it has to be reflashed. 25 MHz does this, and so does
+// 32 MHz, despite 25 MHz being this card's own advertised tr_speed. So the list
+// below is the set measured to actually work on hardware rather than the set
+// that looks reasonable. Add to it from a bench_sdio run, or set
+// SDMMC_FREQ_UNCHECKED to take responsibility for a value yourself.
+#if defined(USE_SDIO) && !defined(SDMMC_FREQ_UNCHECKED)
+#if SDMMC_FREQ != 40000000 && SDMMC_FREQ != 20000000 && \
+    SDMMC_FREQ != 10000000 && SDMMC_FREQ !=  4000000 && \
+    SDMMC_FREQ !=  1000000
+#error "SDMMC_FREQ is not one of the frequencies measured to work (40, 20, 10, 4 or 1 MHz). Others can abort at boot and leave a board that only a reflash recovers; see docs/bugs.md. Define SDMMC_FREQ_UNCHECKED to override."
+#endif
+#endif
+
 // Fallback access point used when no credentials are stored, or the stored
 // network cannot be joined.
 #define AP_SSID_PREFIX  "PrintDrop-Setup"
