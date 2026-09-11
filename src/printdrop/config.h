@@ -105,6 +105,37 @@
 #define BUTTON_EJECT_MS 50
 
 // ---------------------------------------------------------------------------
+// Telling the USB host its cached filesystem is stale
+// ---------------------------------------------------------------------------
+// How long the medium stays withdrawn after UNIT ATTENTION is raised, so a host
+// polling once or twice a second collects it before the card returns.
+#ifndef USB_MEDIA_CHANGED_MS
+#define USB_MEDIA_CHANGED_MS 800
+#endif
+// How long to stay off the bus during a forced re-enumeration. Long enough for
+// the host to tear the device down; short enough not to look like a failure.
+#ifndef USB_DETACH_MS
+#define USB_DETACH_MS 600
+#endif
+// Whether refreshHostView() re-enumerates rather than relying on the medium
+// cycle. Set from measurement, not taste: see docs/bugs.md.
+#ifndef USB_FORCE_REATTACH
+#define USB_FORCE_REATTACH 0
+#endif
+
+// Offer the card to the USB host as write-protected. This is the switch that
+// makes sharing safe rather than merely careful: a host that cannot write can
+// neither cache dirty FAT metadata nor flush it back over an upload, which is
+// the corruption measured in docs/bugs.md. The cost is that files can no longer
+// be dragged onto the card over USB -- the web UI becomes the only writer,
+// which for a print-drop box is the intended flow anyway.
+//
+// Set to 0 for a read-write host, and read the warning in README first.
+#ifndef USB_READ_ONLY
+#define USB_READ_ONLY 1
+#endif
+
+// ---------------------------------------------------------------------------
 // Web UI authentication (feat/ux)
 // ---------------------------------------------------------------------------
 // User and SHA-256 hex of password (64 chars). Stored in NVS namespace

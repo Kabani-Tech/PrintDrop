@@ -44,6 +44,11 @@ bool usbMediaPresent();
 // makes a freshly uploaded file show up in the printer's file list.
 void refreshHostView();
 
+// Drop off the USB bus and come back, forcing the host to rediscover the drive.
+// The only recovery once a host has ejected the LUN, and the only signal some
+// hosts act on at all.
+void reattachHost();
+
 // Acquire before touching the filesystem. `forWrite` additionally withdraws the
 // media from the USB host for the duration. Returns false on timeout, in which
 // case the lock is NOT held and must not be released.

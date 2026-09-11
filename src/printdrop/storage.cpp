@@ -206,6 +206,27 @@ void refreshMountIfStale() {
     mounted = mountCard();
 }
 
+// --- Write protection ------------------------------------------------------
+
+#if USB_READ_ONLY
+// TinyUSB declares this weak and the Arduino core never defines it, so this is
+// the entire write-protect switch. MODE SENSE then reports the medium as
+// protected, which makes hosts mount the volume read-only and stop writing
+// metadata to it, and any WRITE10 that arrives regardless is refused with
+// DATA PROTECT 7/27/00.
+//
+// This is not caution for its own sake. A host that writes caches FAT metadata
+// the device has no way to invalidate, and writes it back later over whatever
+// the ESP32 has changed in the meantime: measured against macOS, an uploaded
+// file vanished and 51 orphaned clusters were left behind, and one upload read
+// back at the right size with the wrong contents. Withdrawing the medium is a
+// hint a host may ignore. Write protection is not.
+extern "C" bool tud_msc_is_writable_cb(uint8_t lun) {
+    (void)lun;
+    return false;
+}
+#endif
+
 // --- USB MSC callbacks -----------------------------------------------------
 // These run on the TinyUSB task. They must never block for long, so they take
 // the mutex with a short timeout and fail the transfer rather than stall USB.
@@ -293,6 +314,34 @@ void setMedia(bool present) {
     if (mediaOffered == present) return;
     mediaOffered = present;
     msc.mediaPresent(present);
+}
+
+// Withdrawing the media reports MEDIUM NOT PRESENT (2/3A/00) correctly, but
+// nothing in TinyUSB 0.16 ever raises UNIT ATTENTION 28h/00 -- "not ready to
+// ready transition, medium may have changed" -- when it comes back. A host that
+// kept the volume mounted therefore has no protocol-level reason to drop its
+// cached FAT, and macOS demonstrably does not: an uploaded file stayed
+// invisible for as long as the volume stayed mounted, and the host's stale
+// allocation table was later written back over it, losing the file and leaving
+// orphaned clusters behind. See docs/bugs.md.
+//
+// TinyUSB substitutes its default MEDIUM NOT PRESENT only while sense_key is
+// still 0, so setting ours first makes the next *failing* command carry UNIT
+// ATTENTION instead. It therefore has to be set while the medium is still
+// withdrawn, and the host needs a poll in that window to collect it.
+void signalMediaChanged() {
+    tud_msc_set_sense(0, SCSI_SENSE_UNIT_ATTENTION, 0x28, 0x00);
+}
+
+// The hammer, for when UNIT ATTENTION is not honoured: drop off the bus
+// entirely. A host cannot hold a cache for a device that is not there, and it
+// is also the only way back after a host has ejected the LUN -- macOS keeps
+// ejecting it otherwise, and not even a firmware reboot brings it back.
+void reattachUsb() {
+    log("[usb] detaching to force the host to rediscover the drive");
+    tud_disconnect();
+    delay(USB_DETACH_MS);
+    tud_connect();
 }
 
 }  // namespace
@@ -417,11 +466,27 @@ void refreshHostView() {
     // (Windows, many printers). The previous 600 ms was missed when the
     // upload was tiny (50-byte file) and the whole offline window was short.
     delay(1500);
+    // Raise the media-changed condition with the medium still withdrawn, and
+    // leave it withdrawn long enough for the host to collect it on a poll.
+    signalMediaChanged();
+    delay(USB_MEDIA_CHANGED_MS);
     if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(5000)) == pdTRUE) {
         setMedia(true);
         xSemaphoreGive(sdMutex);
     }
     log("[usb] media re-presented to host");
+
+#if USB_FORCE_REATTACH
+    // Measured: macOS ignores the removal and the UNIT ATTENTION alike while it
+    // holds the volume mounted. Detaching from the bus is the only signal it
+    // acts on. It costs the host a "disk not ejected properly" complaint, which
+    // is the honest description of what just happened.
+    reattachUsb();
+#endif
+}
+
+void reattachHost() {
+    reattachUsb();
 }
 
 }  // namespace storage
