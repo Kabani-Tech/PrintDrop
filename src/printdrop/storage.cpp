@@ -62,6 +62,7 @@ uint32_t activeWidth    = 0;
 volatile bool hostWrote      = false;   // host changed sectors under our FATFS
 volatile bool hostAttached   = false;
 volatile bool mediaOffered   = false;
+bool          usbStarted     = false;   // USB.begin() actually ran
 
 // How many nested write-locks have withdrawn the media, so the outermost one
 // restores it.
@@ -338,6 +339,13 @@ void signalMediaChanged() {
 // is also the only way back after a host has ejected the LUN -- macOS keeps
 // ejecting it otherwise, and not even a firmware reboot brings it back.
 void reattachUsb() {
+    // begin() bails out before USB.begin() when no card mounts, and TinyUSB is
+    // not safe to poke at before it is initialised. A board sitting there with
+    // no card must not be crashable from an HTTP request.
+    if (!usbStarted) {
+        log("[usb] reattach ignored: USB was never started (no card at boot)");
+        return;
+    }
     log("[usb] detaching to force the host to rediscover the drive");
     tud_disconnect();
     delay(USB_DETACH_MS);
@@ -382,6 +390,7 @@ bool begin() {
     msc.begin(secCount, secSize);
 
     USB.begin();
+    usbStarted = true;
     log("[usb] mass storage started (%s %u-bit @ %u Hz)", busMode(), busWidth(), busFrequency());
     return true;
 }
