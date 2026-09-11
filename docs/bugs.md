@@ -8,6 +8,7 @@ does nothing — so each is written up with the evidence that identified it.
 - [USB: descriptor frozen before `setup()`](#usb-descriptor-frozen-before-setup)
 - [SD: the card was invisible](#sd-the-card-was-invisible)
 - [SD: cards must be identified at 400 kHz](#sd-cards-must-be-identified-at-400-khz)
+- [USB: the host keeps a stale FAT, and wins](#usb-the-host-keeps-a-stale-fat-and-wins)
 
 ---
 
@@ -327,3 +328,128 @@ magnitude — and the ETA derived from it is wrong by the same factor.
 
 **Not yet fixed.** The rate should be measured across the whole upload, from
 `UPLOAD_FILE_START`, not per chunk around the write call.
+
+## USB: the host keeps a stale FAT, and wins
+
+Reported on Reddit, then reproduced. The claim was that no amount of on-chip
+arbitration can be reliable, because a USB host caches FAT metadata the device
+cannot invalidate. That is correct, and the failure is worse than a lost file.
+
+`storage.cpp` withdraws the media before every write from the ESP32, on the
+theory that a host seeing a card removal drops its cache and re-reads the FAT.
+Measured against macOS with the volume mounted read-write:
+
+```
+POST /api/upload  (5 MB)      -> {"ok":true,"size":5242880}
+/api/list                     -> t5m.bin present
+ls /Volumes/NO NAME/t5m.bin   -> No such file or directory   (still, 15 s later)
+                              -> still absent after unmount + mount
+/api/list                     -> t5m.bin GONE from the card as well
+usedBytes                     -> +0.8 MB, not +5 MB
+```
+
+The serial trace shows the mechanism: the host writes its cached allocation
+table back about two seconds after the medium returns.
+
+```
+[web] uploaded /t2m.bin (2097152 bytes)
+[usb] media re-presented to host
+[sd] host wrote sectors, remounting FATFS
+```
+
+It also corrupts data silently. A 2 MB upload read back from the host after a
+**fresh** mount had the right size and the right directory entry, and different
+contents — the host had written into the clusters the device had allocated:
+
+```
+host read : cb3a61ee0349e8f1ca68a7a0921958b88e686c991ce48360ceae1d6c358c9011
+original  : 356c7d2d9c2bcf54669f983f452f3c88729e889717a900baf0f81c910b17a2de
+```
+
+`fsck_msdos` afterwards: `Found 51 orphaned clusters` (~816 KB, matching the
+usedBytes anomaly). macOS could not repair it.
+
+**Cause.** Withdrawing the media reports MEDIUM NOT PRESENT (2/3A/00) correctly.
+Nothing ever raises UNIT ATTENTION 28h/00 — "not ready to ready transition,
+medium may have changed" — when it comes back. Every `set_sense` call site in
+TinyUSB 0.16 `msc_device.c` was checked: only ILLEGAL REQUEST 0x20, NOT READY
+0x3A and DATA PROTECT 0x27 are ever generated. A host that kept the volume
+mounted has no reason to invalidate anything, and macOS does not.
+
+**Partly fixed.** `signalMediaChanged()` now raises UNIT ATTENTION while the
+medium is still withdrawn, and `refreshHostView()` holds it there long enough
+for the host to collect it on a poll. Where that is not honoured,
+`USB_FORCE_REATTACH` makes the device leave the bus and come back, which no
+host can cache through. The underlying asymmetry remains: a read-only consumer
+— which is what a printer is — cannot corrupt anything, and was measured intact
+through the same test; a read-write host can, and no device-side arbitration
+changes that.
+
+### A read that fails takes the whole firmware down
+
+Downloading the file whose cluster chain had been clobbered:
+
+```
+GET /api/download?path=/t2m.bin -> 200, 12288 bytes, then nothing, forever
+/api/status                     -> no response
+serial console                  -> no output, no response to any command
+ping                            -> still replies
+```
+
+Only a hardware reset recovers it. Reproduced three times. A healthy 8.6 MB file
+downloads in 17.3 s (498 KB/s) with a matching sha256, so it is the failed read,
+not the size.
+
+**Cause.** `server.streamFile()` hands the `File` to `WiFiClient::write(Stream&)`:
+
+```cpp
+size_t available = stream.available();
+while(available){
+    toRead = (available > 1360)?1360:available;
+    toWrite = stream.readBytes(buf, toRead);
+    written += write(buf, toWrite);
+    available = stream.available();
+}
+```
+
+Nothing checks `toWrite`. A read that returns 0 leaves the file position where
+it was, so `available` never falls and the loop spins forever — on `loopTask`,
+which is also the web server and the serial console.
+
+**Fixed.** `handleDownload()` sends the body itself and stops on a short read or
+a disconnected client, so the client sees a truncated transfer instead.
+
+### A host that ejects the card never gets it back
+
+After `diskutil unmount force`, macOS sent 68 `START_STOP_UNIT` ejects and
+removed the device. `/api/eject`, which withdraws and re-presents the media, did
+nothing. Neither did a full firmware reboot: the drive came back and was ejected
+again immediately. It took a physical unplug.
+
+**Fixed.** `storage::reattachHost()` drops the USB device off the bus and
+re-attaches it, which forces a rediscovery. Exposed as `POST /api/usb/reattach`
+and as `reattach` on the serial console.
+
+### OTA wrote flash before checking the password
+
+`handleOtaUploadData()` ran `ota::beginUpdate()` and `ota::writeUpdate()` with no
+authentication; only `handleOtaUploadDone()` checked, by which point the whole
+image had been written to the OTA partition. It could not be *booted* without
+the password, since `Update.end(true)` never ran, but an unauthenticated request
+could still scribble over the spare partition at will.
+
+**Fixed.** Credentials are checked at `UPLOAD_FILE_START`, as the file-upload
+path already did.
+
+### The BOOTLOADER hatch panics
+
+`BOOTLOADER` on the serial console is supposed to reboot into download mode. It
+crashes instead:
+
+```
+EXCCAUSE: 0x0000001c   EXCVADDR: 0x00000000     (LoadProhibited)
+Backtrace: 0x400511b1 0x40049185 0x400491e5 0x40043917 ...
+```
+
+**Not yet fixed.** `POST /api/ota` works and needs no buttons, so that is the
+supported way to reflash a board whose USB is in MSC mode.

@@ -79,13 +79,30 @@ ESP32's own FATFS cache goes stale if the host writes sectors underneath it.
 
 1. **One mutex.** Every SD access, from either side, is serialised.
 2. **Withdraw before writing.** Before the ESP32 modifies the card, the media is
-   withdrawn from the USB host, then re-presented afterwards. The printer sees a
+   withdrawn from the USB host, with UNIT ATTENTION raised so the host is told
+   the medium may have changed, then re-presented afterwards. The printer sees a
    card removal and re-reads its file list, so uploads appear without a reboot.
 3. **Remount when the host writes.** MSC write callbacks set a flag; the ESP32
    remounts FATFS before trusting its own view of the filesystem again.
 
 MSC callbacks take the mutex with a short timeout and fail the transfer rather
 than stall the USB task, so a slow Wi-Fi upload can never hang the printer.
+
+### What this does not fix
+
+**A host that mounts the card read-write can still corrupt it, and no amount of
+device-side arbitration changes that.** USB mass storage has no way for the
+device to invalidate a cache the host has already taken. Withdrawing the medium
+is a hint, not a guarantee, and macOS was measured ignoring it: a file uploaded
+over Wi-Fi stayed invisible while the volume was mounted, and the host's stale
+allocation table was later written back over it, losing the file and leaving
+orphaned clusters. One upload came back with the right size and different
+contents. The evidence is in [`docs/bugs.md`](docs/bugs.md).
+
+A **read-only** consumer cannot do this, and a 3D printer reading a job from the
+card is exactly that — it was measured intact through the same test. So the
+intended use is sound. Mounting the card on a desktop while PrintDrop is writing
+to it is not; use the web UI, or unmount it first.
 
 The full design is in [`docs/architecture.md`](docs/architecture.md).
 
