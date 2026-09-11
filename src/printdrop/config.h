@@ -149,6 +149,13 @@
 #define SD_REMOUNT_MAX_MS 60000
 #endif
 
+// How often an upload broadcasts progress over the websocket. One frame per
+// 1436-byte chunk is ~140 frames per megabyte, sent from the same task that is
+// doing the upload.
+#ifndef UPLOAD_PROGRESS_INTERVAL_MS
+#define UPLOAD_PROGRESS_INTERVAL_MS 250
+#endif
+
 // ---------------------------------------------------------------------------
 // Web UI authentication (feat/ux)
 // ---------------------------------------------------------------------------
