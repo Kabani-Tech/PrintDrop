@@ -71,6 +71,27 @@
 #define SDMMC_FREQ 40000000
 #endif
 
+// Not every plausible frequency is survivable. The SDMMC host rounds a request
+// it cannot divide to exactly, and when the result exceeds what the card
+// advertises the IDF aborts inside sdmmc_init_host_frequency:
+//
+//   assert failed: sdmmc_init_host_frequency sdmmc_common.c:198
+//   (card->max_freq_khz <= card->host.max_freq_khz)
+//
+// That is a boot loop, and since SDMMC_FREQ is a build flag the board cannot be
+// talked out of it -- it has to be reflashed. 25 MHz does this, and so does
+// 32 MHz, despite 25 MHz being this card's own advertised tr_speed. So the list
+// below is the set measured to actually work on hardware rather than the set
+// that looks reasonable. Add to it from a bench_sdio run, or set
+// SDMMC_FREQ_UNCHECKED to take responsibility for a value yourself.
+#if defined(USE_SDIO) && !defined(SDMMC_FREQ_UNCHECKED)
+#if SDMMC_FREQ != 40000000 && SDMMC_FREQ != 20000000 && \
+    SDMMC_FREQ != 10000000 && SDMMC_FREQ !=  4000000 && \
+    SDMMC_FREQ !=  1000000
+#error "SDMMC_FREQ is not one of the frequencies measured to work (40, 20, 10, 4 or 1 MHz). Others can abort at boot and leave a board that only a reflash recovers; see docs/bugs.md. Define SDMMC_FREQ_UNCHECKED to override."
+#endif
+#endif
+
 // Fallback access point used when no credentials are stored, or the stored
 // network cannot be joined.
 #define AP_SSID_PREFIX  "PrintDrop-Setup"
@@ -103,6 +124,58 @@
 #endif
 #define BUTTON_FACTORY_RESET_MS 5000
 #define BUTTON_EJECT_MS 50
+
+// ---------------------------------------------------------------------------
+// Telling the USB host its cached filesystem is stale
+// ---------------------------------------------------------------------------
+// How long the medium stays withdrawn after UNIT ATTENTION is raised, so a host
+// polling once or twice a second collects it before the card returns.
+#ifndef USB_MEDIA_CHANGED_MS
+#define USB_MEDIA_CHANGED_MS 800
+#endif
+// How long to stay off the bus during a forced re-enumeration. Long enough for
+// the host to tear the device down; short enough not to look like a failure.
+#ifndef USB_DETACH_MS
+#define USB_DETACH_MS 600
+#endif
+// Whether refreshHostView() re-enumerates rather than relying on the medium
+// cycle. Set from measurement, not taste: see docs/bugs.md.
+#ifndef USB_FORCE_REATTACH
+#define USB_FORCE_REATTACH 0
+#endif
+
+// Offer the card to the USB host as write-protected. This is the switch that
+// makes sharing safe rather than merely careful: a host that cannot write can
+// neither cache dirty FAT metadata nor flush it back over an upload, which is
+// the corruption measured in docs/bugs.md. The cost is that files can no longer
+// be dragged onto the card over USB -- the web UI becomes the only writer,
+// which for a print-drop box is the intended flow anyway.
+//
+// Set to 0 for a read-write host, and read the warning in README first.
+#ifndef USB_READ_ONLY
+#define USB_READ_ONLY 1
+#endif
+
+// How many consecutive failed transfers mean the card has stopped answering
+// rather than hiccuped, and how often to retry a mount once it has.
+#ifndef SD_FAULT_THRESHOLD
+#define SD_FAULT_THRESHOLD 8
+#endif
+#ifndef SD_REMOUNT_INTERVAL_MS
+#define SD_REMOUNT_INTERVAL_MS 5000
+#endif
+// Retries back off to this, so a board with no card does not spend loopTask on
+// the SDMMC host and leave the web UI crawling.
+#ifndef SD_REMOUNT_MAX_MS
+#define SD_REMOUNT_MAX_MS 60000
+#endif
+
+// How often an upload broadcasts progress over the websocket. One frame per
+// 1436-byte chunk is ~140 frames per megabyte, sent from the same task that is
+// doing the upload.
+#ifndef UPLOAD_PROGRESS_INTERVAL_MS
+#define UPLOAD_PROGRESS_INTERVAL_MS 250
+#endif
 
 // ---------------------------------------------------------------------------
 // Web UI authentication (feat/ux)

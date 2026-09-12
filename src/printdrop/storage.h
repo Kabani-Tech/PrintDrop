@@ -21,6 +21,10 @@
 namespace storage {
 
 bool begin();
+// Call from loop(). Retries a card that was absent or has stopped answering,
+// and starts USB if the card only turned up after boot. Without it, a card
+// that fails at any point stays failed until the board is power-cycled.
+void poll();
 bool cardMounted();
 
 uint64_t totalBytes();
@@ -43,6 +47,11 @@ bool usbMediaPresent();
 // Withdraw and re-present the media so the host re-reads the FAT. This is what
 // makes a freshly uploaded file show up in the printer's file list.
 void refreshHostView();
+
+// Drop off the USB bus and come back, forcing the host to rediscover the drive.
+// The only recovery once a host has ejected the LUN, and the only signal some
+// hosts act on at all.
+void reattachHost();
 
 // Acquire before touching the filesystem. `forWrite` additionally withdraws the
 // media from the USB host for the duration. Returns false on timeout, in which

@@ -39,6 +39,8 @@ inline bool sdioWriteRAW(uint8_t* buf, uint32_t sector, uint32_t count = 1) {
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
+#include <esp_log.h>
+
 #include "config.h"
 #include "led.h"
 
@@ -62,12 +64,42 @@ uint32_t activeWidth    = 0;
 volatile bool hostWrote      = false;   // host changed sectors under our FATFS
 volatile bool hostAttached   = false;
 volatile bool mediaOffered   = false;
+bool          usbStarted     = false;   // USB.begin() actually ran
+
+// The card is not reliably present. It can fail to answer at boot, and it can
+// stop answering later — measured repeatedly on this hardware, always
+// sdmmc_send_cmd timing out (0x107) with the wiring untouched. Neither case
+// used to recover without a power cycle, and status kept reporting "mounted"
+// while every single read failed. Count failures, give up on the mount when
+// they pile up, and keep retrying so the board heals itself when the card
+// comes back.
+volatile uint32_t consecutiveErrors = 0;
+volatile bool     busFaulted        = false;
+uint32_t          lastMountAttempt  = 0;
+uint32_t          retryDelayMs      = SD_REMOUNT_INTERVAL_MS;
 
 // How many nested write-locks have withdrawn the media, so the outermost one
 // restores it.
 int  mediaWithdrawnDepth = 0;
 
+// Set while poll() is retrying quietly: the mount ladder is five rungs of
+// failure messages, and at one attempt every few seconds it would bury every
+// other line on the console.
+bool quietMount = false;
+
+void logStep(const char* fmt, ...);
+
 void log(const char* fmt, ...) {
+    char buf[192];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    Serial.println(buf);
+}
+
+void logStep(const char* fmt, ...) {
+    if (quietMount) return;
     char buf[192];
     va_list args;
     va_start(args, fmt);
@@ -83,7 +115,11 @@ void log(const char* fmt, ...) {
 // SDIO 4-bit via the SDMMC host. The driver handles the 400 kHz
 // identification internally, so we only validate the link at each frequency
 // step and keep the fastest that survives a probe read.
-bool mountCard() {
+// `quick` tries only the top rung. The full ladder takes about 4.5 seconds of
+// timeouts to walk, and poll() runs on loopTask -- so retrying with it would
+// make every HTTP request wait that long, exactly when someone is trying to
+// use the web UI to find out why there is no card.
+bool mountCard(bool quick = false) {
     const bool mode1bit = (SDMMC_WIDTH == 1);
     SD_MMC.setPins(SDMMC_CLK_PIN, SDMMC_CMD_PIN, SDMMC_D0_PIN,
                    mode1bit ? -1 : SDMMC_D1_PIN,
@@ -100,7 +136,9 @@ bool mountCard() {
         1000,
     };
 
-    for (uint32_t fKhz : ladderKhz) {
+    const size_t rungs = quick ? 1 : (sizeof(ladderKhz) / sizeof(ladderKhz[0]));
+    for (size_t i = 0; i < rungs; ++i) {
+        const uint32_t fKhz = ladderKhz[i];
         if (SD_MMC.begin("/sdcard", mode1bit, false, fKhz, 5)) {
             // Verify before trusting: a marginal clock mounts but serves corrupt
             // sectors. Use the raw sdmmc path — SD_MMC Arduino 2.0.x has no
@@ -116,17 +154,17 @@ bool mountCard() {
                     activeWidth, activeFreq, secCount, secSize);
                 return true;
             }
-            log("[sd] SDIO %u-bit %u kHz mounted but probe failed, stepping down",
+            logStep("[sd] SDIO %u-bit %u kHz mounted but probe failed, stepping down",
                 mode1bit ? 1 : 4, fKhz);
             SD_MMC.end();
         } else {
-            log("[sd] SDIO %u-bit %u kHz mount failed, stepping down",
+            logStep("[sd] SDIO %u-bit %u kHz mount failed, stepping down",
                 mode1bit ? 1 : 4, fKhz);
         }
         delay(200);
     }
 
-    log("[sd] SDIO mount failed at all frequencies");
+    logStep("[sd] SDIO mount failed at all frequencies");
     return false;
 }
 
@@ -139,11 +177,14 @@ void endBus() {
 // The SD specification requires identification at <=400 kHz; only afterwards
 // may the clock rise. SD.begin() runs that sequence at whatever frequency it is
 // handed, so a cold card must be mounted slowly first.
-bool mountCard() {
+// See the SDIO note: `quick` keeps poll()'s retry off loopTask for seconds at
+// a time.
+bool mountCard(bool quick = false) {
     sdSPI.begin(SD_CLK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
 
     bool identified = false;
-    for (int attempt = 1; attempt <= 5 && !identified; ++attempt) {
+    const int tries = quick ? 1 : 5;
+    for (int attempt = 1; attempt <= tries && !identified; ++attempt) {
         if (SD.begin(SD_CS_PIN, sdSPI, 400000)) {
             identified = true;
             break;
@@ -152,12 +193,14 @@ bool mountCard() {
         delay(400);
     }
     if (!identified) {
-        log("[sd] identification failed at 400 kHz");
+        logStep("[sd] identification failed at 400 kHz");
         return false;
     }
 
     const uint32_t ladder[] = {SD_SPI_FREQ, 10000000, 4000000, 1000000};
-    for (uint32_t f : ladder) {
+    const size_t rungs = quick ? 1 : (sizeof(ladder) / sizeof(ladder[0]));
+    for (size_t i = 0; i < rungs; ++i) {
+        const uint32_t f = ladder[i];
         SD.end();
         if (!SD.begin(SD_CS_PIN, sdSPI, f)) continue;
         // Verify before trusting: a marginal clock mounts fine and then serves
@@ -206,6 +249,34 @@ void refreshMountIfStale() {
     mounted = mountCard();
 }
 
+// --- Write protection ------------------------------------------------------
+
+#if USB_READ_ONLY
+// TinyUSB declares this weak and the Arduino core never defines it, so this is
+// the entire write-protect switch. MODE SENSE then reports the medium as
+// protected, which makes hosts mount the volume read-only and stop writing
+// metadata to it, and any WRITE10 that arrives regardless is refused with
+// DATA PROTECT 7/27/00.
+//
+// This is not caution for its own sake. A host that writes caches FAT metadata
+// the device has no way to invalidate, and writes it back later over whatever
+// the ESP32 has changed in the meantime: measured against macOS, an uploaded
+// file vanished and 51 orphaned clusters were left behind, and one upload read
+// back at the right size with the wrong contents. Withdrawing the medium is a
+// hint a host may ignore. Write protection is not.
+extern "C" bool tud_msc_is_writable_cb(uint8_t lun) {
+    (void)lun;
+    return false;
+}
+#endif
+
+// Called from the MSC callbacks, so it must stay cheap and do no recovery work
+// of its own: the TinyUSB task only raises the flag, and poll() acts on it.
+inline void noteTransfer(bool ok) {
+    if (ok) { consecutiveErrors = 0; return; }
+    if (++consecutiveErrors >= SD_FAULT_THRESHOLD) busFaulted = true;
+}
+
 // --- USB MSC callbacks -----------------------------------------------------
 // These run on the TinyUSB task. They must never block for long, so they take
 // the mutex with a short timeout and fail the transfer rather than stall USB.
@@ -227,6 +298,7 @@ int32_t onRead(uint32_t lba, uint32_t offset, void* buffer, uint32_t bufsize) {
     if (!sdioReadRAW(reinterpret_cast<uint8_t*>(buffer), lba, count)) {
         result = -1;
     }
+    noteTransfer(result >= 0);
 #else
     // SDFS exposes only single-sector access, so the SPI path keeps the loop.
     for (uint32_t i = 0; i < count; ++i) {
@@ -235,6 +307,7 @@ int32_t onRead(uint32_t lba, uint32_t offset, void* buffer, uint32_t bufsize) {
             break;
         }
     }
+    noteTransfer(result >= 0);
 #endif
     led::setActivity(false);
     xSemaphoreGive(sdMutex);
@@ -256,6 +329,7 @@ int32_t onWrite(uint32_t lba, uint32_t offset, uint8_t* buffer, uint32_t bufsize
     if (!sdioWriteRAW(buffer, lba, count)) {
         result = -1;
     }
+    noteTransfer(result >= 0);
 #else
     for (uint32_t i = 0; i < count; ++i) {
         if (!SD.writeRAW(buffer + i * secSize, lba + i)) {
@@ -263,6 +337,7 @@ int32_t onWrite(uint32_t lba, uint32_t offset, uint8_t* buffer, uint32_t bufsize
             break;
         }
     }
+    noteTransfer(result >= 0);
 #endif
     // Our cached FATFS view is now suspect regardless of success.
     hostWrote = true;
@@ -295,9 +370,46 @@ void setMedia(bool present) {
     msc.mediaPresent(present);
 }
 
+// Withdrawing the media reports MEDIUM NOT PRESENT (2/3A/00) correctly, but
+// nothing in TinyUSB 0.16 ever raises UNIT ATTENTION 28h/00 -- "not ready to
+// ready transition, medium may have changed" -- when it comes back. A host that
+// kept the volume mounted therefore has no protocol-level reason to drop its
+// cached FAT, and macOS demonstrably does not: an uploaded file stayed
+// invisible for as long as the volume stayed mounted, and the host's stale
+// allocation table was later written back over it, losing the file and leaving
+// orphaned clusters behind. See docs/bugs.md.
+//
+// TinyUSB substitutes its default MEDIUM NOT PRESENT only while sense_key is
+// still 0, so setting ours first makes the next *failing* command carry UNIT
+// ATTENTION instead. It therefore has to be set while the medium is still
+// withdrawn, and the host needs a poll in that window to collect it.
+void signalMediaChanged() {
+    tud_msc_set_sense(0, SCSI_SENSE_UNIT_ATTENTION, 0x28, 0x00);
+}
+
+// The hammer, for when UNIT ATTENTION is not honoured: drop off the bus
+// entirely. A host cannot hold a cache for a device that is not there, and it
+// is also the only way back after a host has ejected the LUN -- macOS keeps
+// ejecting it otherwise, and not even a firmware reboot brings it back.
+void reattachUsb() {
+    // begin() bails out before USB.begin() when no card mounts, and TinyUSB is
+    // not safe to poke at before it is initialised. A board sitting there with
+    // no card must not be crashable from an HTTP request.
+    if (!usbStarted) {
+        log("[usb] reattach ignored: USB was never started (no card at boot)");
+        return;
+    }
+    log("[usb] detaching to force the host to rediscover the drive");
+    tud_disconnect();
+    delay(USB_DETACH_MS);
+    tud_connect();
+}
+
 }  // namespace
 
 // --- Public API ------------------------------------------------------------
+
+static void startUsb();
 
 bool begin() {
     sdMutex = xSemaphoreCreateMutex();
@@ -309,6 +421,13 @@ bool begin() {
         log("[sd] card reports zero geometry");
         return false;
     }
+
+    startUsb();
+    return true;
+}
+
+static void startUsb() {
+    if (usbStarted) return;
 
     USB.onEvent(onUsbEvent);
 
@@ -333,8 +452,9 @@ bool begin() {
     msc.begin(secCount, secSize);
 
     USB.begin();
-    log("[usb] mass storage started (%s %u-bit @ %u Hz)", busMode(), busWidth(), busFrequency());
-    return true;
+    usbStarted = true;
+    log("[usb] mass storage started (%s %u-bit @ %u Hz, %s)", busMode(), busWidth(),
+        busFrequency(), USB_READ_ONLY ? "write-protected" : "read-write");
 }
 
 bool     cardMounted()    { return mounted; }
@@ -417,11 +537,97 @@ void refreshHostView() {
     // (Windows, many printers). The previous 600 ms was missed when the
     // upload was tiny (50-byte file) and the whole offline window was short.
     delay(1500);
+    // Raise the media-changed condition with the medium still withdrawn, and
+    // leave it withdrawn long enough for the host to collect it on a poll.
+    signalMediaChanged();
+    delay(USB_MEDIA_CHANGED_MS);
     if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(5000)) == pdTRUE) {
         setMedia(true);
         xSemaphoreGive(sdMutex);
     }
     log("[usb] media re-presented to host");
+
+#if USB_FORCE_REATTACH
+    // Measured: macOS ignores the removal and the UNIT ATTENTION alike while it
+    // holds the volume mounted. Detaching from the bus is the only signal it
+    // acts on. It costs the host a "disk not ejected properly" complaint, which
+    // is the honest description of what just happened.
+    reattachUsb();
+#endif
+}
+
+void reattachHost() {
+    reattachUsb();
+}
+
+// Called from loop(). Two jobs, both of which used to need a power cycle.
+void poll() {
+    if (!sdMutex) return;
+    const uint32_t now = millis();
+
+    // A card that has started failing is worse than an absent one: it still
+    // answers the geometry queries, so status reports "mounted" while every
+    // transfer times out and the host sees nothing but errors. Drop the mount
+    // and let the retry below rebuild it.
+    if (busFaulted) {
+        busFaulted = false;
+        if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(200)) != pdTRUE) return;
+        log("[sd] %u consecutive transfer failures — dropping the mount",
+            (unsigned)consecutiveErrors);
+        consecutiveErrors = 0;
+        setMedia(false);
+        endBus();
+        mounted = false;
+        activeFreq = activeWidth = 0;
+        xSemaphoreGive(sdMutex);
+        lastMountAttempt = now;
+        return;
+    }
+
+    if (mounted) return;
+    if (lastMountAttempt != 0 && (now - lastMountAttempt) < retryDelayMs) return;
+    lastMountAttempt = now;
+
+    // The ladder is loud, and at one attempt every few seconds it would bury
+    // the console. Keep the first report and then one in ten.
+    static uint32_t attempts = 0;
+    const bool verbose = (attempts++ % 10) == 0;
+    quietMount = !verbose;
+    if (!verbose) esp_log_level_set("*", ESP_LOG_NONE);
+
+    bool ok = false;
+    if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+        // Probe the top rung only; if a card answers there, walk the full
+        // ladder to settle on the clock it is actually good for.
+        ok = mountCard(/*quick=*/true);
+        mounted = ok;
+        xSemaphoreGive(sdMutex);
+    }
+    quietMount = false;
+    if (!verbose) esp_log_level_set("*", ESP_LOG_ERROR);
+
+    if (!ok) {
+        // Back off so a board left without a card is not spending most of
+        // loopTask on the SDMMC host.
+        if (retryDelayMs < SD_REMOUNT_MAX_MS) retryDelayMs *= 2;
+        if (verbose) {
+            log("[sd] still no card (attempt %u), retrying every %u s",
+                (unsigned)attempts, (unsigned)(retryDelayMs / 1000));
+        }
+        return;
+    }
+
+    log("[sd] card is back after %u attempts", (unsigned)attempts);
+    attempts = 0;
+    retryDelayMs = SD_REMOUNT_INTERVAL_MS;
+    if (!usbStarted) {
+        // No card at boot means USB never started; start it now so the drive
+        // appears without a reboot.
+        startUsb();
+    } else {
+        setMedia(true);
+        reattachUsb();
+    }
 }
 
 }  // namespace storage

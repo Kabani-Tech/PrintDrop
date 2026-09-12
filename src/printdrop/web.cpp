@@ -34,6 +34,13 @@ bool   uploadHoldsLock = false;
 String uploadError;
 String uploadName;
 size_t uploadBytes = 0;
+// HTTPUpload::totalSize counts bytes received so far, not the expected total,
+// so it cannot answer "how far along is this?". The request's Content-Length
+// can: it overshoots by the multipart preamble and trailer, a few hundred
+// bytes, which is why the percentage is clamped rather than trusted at the end.
+size_t   uploadExpected  = 0;
+uint32_t uploadStartMs   = 0;
+uint32_t lastProgressMs  = 0;
 
 void log(const char* fmt, ...) {
     char buf[192];
@@ -355,7 +362,39 @@ void handleDownload() {
     String name = path.substring(path.lastIndexOf('/') + 1);
     sendCorsHeaders();
     server.sendHeader("Content-Disposition", "attachment; filename=\"" + name + "\"");
-    server.streamFile(f, "application/octet-stream");
+
+    // Deliberately not server.streamFile(): it hands the File to
+    // WiFiClient::write(Stream&), which loops `while (stream.available())` and
+    // never checks whether readBytes() actually returned anything. A file whose
+    // cluster chain is damaged reads 0 bytes forever, available() never falls,
+    // and the loop spins on loopTask -- which takes the web server AND the
+    // serial console down until someone power-cycles the board. Reproduced
+    // three times; see docs/bugs.md. Send it ourselves so a failed read ends
+    // the response instead.
+    const size_t total = f.size();
+    server.setContentLength(total);
+    server.send(200, "application/octet-stream", "");
+
+    uint8_t  buf[1024];
+    size_t   sent = 0;
+    while (sent < total) {
+        if (!server.client().connected()) {
+            log("[web] download of %s abandoned by the client at %u/%u bytes",
+                path.c_str(), (unsigned)sent, (unsigned)total);
+            break;
+        }
+        const size_t want = (total - sent) < sizeof(buf) ? (total - sent) : sizeof(buf);
+        const int    got  = f.read(buf, want);
+        if (got <= 0) {
+            // Short body against a declared Content-Length: the client reports a
+            // truncated transfer, which is what we want it to see.
+            log("[web] read failed on %s at %u/%u bytes, truncating the response",
+                path.c_str(), (unsigned)sent, (unsigned)total);
+            break;
+        }
+        server.sendContent(reinterpret_cast<const char*>(buf), (size_t)got);
+        sent += (size_t)got;
+    }
     f.close();
 }
 
@@ -363,6 +402,15 @@ void handleEject() {
     if (!requireAuth()) return;
     storage::refreshHostView();
     sendOk();
+}
+
+// Recovery hatch: once a host has ejected the media it keeps ejecting it, and
+// re-presenting the media does not change its mind. Leaving the bus entirely
+// does, and that is the only way back short of unplugging the cable.
+void handleReattach() {
+    if (!requireAuth()) return;
+    sendOk();               // answer first; the detach takes the drive away
+    storage::reattachHost();
 }
 
 // --- API: upload -----------------------------------------------------------
@@ -378,6 +426,10 @@ void handleUploadData() {
         led::setActivity(true);
         uploadError = "";
         uploadBytes = 0;
+        uploadStartMs = millis();
+        lastProgressMs = 0;
+        const int declared = server.clientContentLength();
+        uploadExpected = declared > 0 ? (size_t)declared : 0;
 
         String dir;
         // Query-string arguments are parsed before the multipart body, so this
@@ -403,19 +455,38 @@ void handleUploadData() {
 
     } else if (up.status == UPLOAD_FILE_WRITE) {
         if (uploadFile && uploadError.isEmpty()) {
-            uint32_t t0 = millis();
             if (uploadFile.write(up.buf, up.currentSize) != up.currentSize) {
                 uploadError = "Write failed — card full?";
             } else {
                 uploadBytes += up.currentSize;
-                // WS progress (best-effort)
+                // Every one of these numbers used to be wrong. The rate was
+                // timed around the card write alone — 0-1 ms for a 1436-byte
+                // chunk — so it reported the card's write speed, ~1.4 MB/s,
+                // rather than the ~200 KB/s the upload was actually moving.
+                // The percentage divided by HTTPUpload::totalSize, which counts
+                // bytes received so far, so it sat at 100 from the first chunk;
+                // the ETA compared the same two counters and was always 0.
+                const uint32_t now     = millis();
+                const uint32_t elapsed = now - uploadStartMs;
+                uint32_t rate = 0;   // bytes/s across the whole upload
+                if (elapsed > 0) {
+                    rate = (uint32_t)((uint64_t)uploadBytes * 1000ULL / elapsed);
+                }
                 uint8_t pct = 0;
-                if (up.totalSize > 0) pct = (uint8_t)(uploadBytes * 100 / up.totalSize);
-                uint32_t elapsed = millis() - t0 + 1;
-                uint32_t rate = up.currentSize * 1000 / elapsed;
+                if (uploadExpected > 0) {
+                    const uint64_t p = (uint64_t)uploadBytes * 100ULL / uploadExpected;
+                    pct = (uint8_t)(p > 99 ? 99 : p);   // 100 belongs to FILE_END
+                }
                 uint32_t eta = 0;
-                if (rate > 0 && up.totalSize > uploadBytes) eta = (up.totalSize - uploadBytes) / rate;
-                ws::broadcastProgress(uploadName, pct, rate, eta);
+                if (rate > 0 && uploadExpected > uploadBytes) {
+                    eta = (uint32_t)((uploadExpected - uploadBytes) / rate);
+                }
+                // One broadcast per chunk is ~140 websocket frames per MB, all
+                // of them on the same task doing the upload.
+                if (now - lastProgressMs >= UPLOAD_PROGRESS_INTERVAL_MS) {
+                    lastProgressMs = now;
+                    ws::broadcastProgress(uploadName, pct, rate, eta);
+                }
             }
         }
 
@@ -424,8 +495,11 @@ void handleUploadData() {
         if (uploadHoldsLock) { storage::unlock(); uploadHoldsLock = false; }
         led::setActivity(false);
         if (uploadError.isEmpty()) {
-            log("[web] uploaded %s (%u bytes)", uploadName.c_str(), (unsigned)uploadBytes);
-            ws::broadcastProgress(uploadName, 100, 0, 0);
+            const uint32_t elapsed = millis() - uploadStartMs;
+            const uint32_t rate = elapsed ? (uint32_t)((uint64_t)uploadBytes * 1000ULL / elapsed) : 0;
+            log("[web] uploaded %s (%u bytes in %u ms, %u KB/s)", uploadName.c_str(),
+                (unsigned)uploadBytes, (unsigned)elapsed, (unsigned)(rate / 1024));
+            ws::broadcastProgress(uploadName, 100, rate, 0);
         }
 
     } else if (up.status == UPLOAD_FILE_ABORTED) {
@@ -579,6 +653,13 @@ void handleOtaUploadData() {
     HTTPUpload& up = server.upload();
     if (up.status == UPLOAD_FILE_START) {
         otaError = "";
+        // Check credentials here, not only in handleOtaUploadDone: the data
+        // callbacks run first, so an unauthenticated POST would otherwise write
+        // a whole image into the OTA partition before being turned away.
+        if (auth::isRequired() && !auth::checkBasicAuth(server.header("Authorization"))) {
+            otaError = "Authentication required";
+            return;
+        }
         String err;
         size_t total = server.header("Content-Length").toInt();
         // WebServer doesn't give total easily; use UPDATE_SIZE_UNKNOWN if 0
@@ -617,6 +698,7 @@ bool begin() {
     server.on("/api/mkdir",     HTTP_POST, handleMkdir);
     server.on("/api/rename",    HTTP_POST, handleRename);
     server.on("/api/eject",     HTTP_POST, handleEject);
+    server.on("/api/usb/reattach", HTTP_POST, handleReattach);
     server.on("/api/wifi/scan", HTTP_GET,  handleWifiScan);
     server.on("/api/wifi",      HTTP_POST, handleWifiSave);
     server.on("/api/upload",    HTTP_POST, handleUploadDone, handleUploadData);

@@ -17,6 +17,8 @@ Drop a print job from your desk instead of walking a USB stick to the machine.
 [![Status](https://img.shields.io/badge/status-working%20on%20hardware-brightgreen)](docs/)
 [![Issues](https://img.shields.io/github/issues/Akash97p/PrintDrop)](https://github.com/Akash97p/PrintDrop/issues)
 [![Last commit](https://img.shields.io/github/last-commit/Akash97p/PrintDrop)](https://github.com/Akash97p/PrintDrop/commits)
+[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-db61a2?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/Akash97p)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/akash97p)
 
 </div>
 
@@ -75,17 +77,41 @@ has it mounted, the host's cached allocation table goes stale and the next
 write from either side corrupts the filesystem. The reverse is also true — the
 ESP32's own FATFS cache goes stale if the host writes sectors underneath it.
 
-`src/printdrop/storage.cpp` enforces three rules:
+`src/printdrop/storage.cpp` enforces four rules:
 
-1. **One mutex.** Every SD access, from either side, is serialised.
-2. **Withdraw before writing.** Before the ESP32 modifies the card, the media is
-   withdrawn from the USB host, then re-presented afterwards. The printer sees a
+1. **The host cannot write.** The card is offered to USB as write-protected
+   (`USB_READ_ONLY`, on by default). A host that cannot write cannot cache dirty
+   filesystem metadata, and so cannot flush a stale copy back over an upload.
+   The cost: files can no longer be dragged onto the card over USB. The web UI
+   is the only writer, which for a print-drop box is the intended flow anyway.
+2. **One mutex.** Every SD access, from either side, is serialised.
+3. **Withdraw before writing.** Before the ESP32 modifies the card, the media is
+   withdrawn from the USB host, with UNIT ATTENTION raised so the host is told
+   the medium may have changed, then re-presented afterwards. The printer sees a
    card removal and re-reads its file list, so uploads appear without a reboot.
-3. **Remount when the host writes.** MSC write callbacks set a flag; the ESP32
-   remounts FATFS before trusting its own view of the filesystem again.
+4. **Remount when the host writes.** MSC write callbacks set a flag; the ESP32
+   remounts FATFS before trusting its own view of the filesystem again. This
+   only matters with rule 1 turned off.
 
 MSC callbacks take the mutex with a short timeout and fail the transfer rather
 than stall the USB task, so a slow Wi-Fi upload can never hang the printer.
+
+### Why rule 1 exists
+
+Rules 2 to 4 are not enough on their own, and that is measurable rather than
+theoretical. USB mass storage gives the device no way to invalidate a cache the
+host has already taken; withdrawing the medium is a hint a host may ignore, and
+macOS ignores it. With the volume mounted read-write, a file uploaded over Wi-Fi
+stayed invisible for as long as it stayed mounted, and the host's stale
+allocation table was later written back over it — the file was gone from the
+card and `fsck` found 51 orphaned clusters. Another upload read back at the
+right size with different contents, because the host had written into the
+clusters the device had allocated. Full evidence in
+[`docs/bugs.md`](docs/bugs.md).
+
+Write protection removes that rather than narrowing it. **Setting
+`USB_READ_ONLY=0` puts you back in the state described above**, which is only
+reasonable if nothing will write from the host side while PrintDrop is running.
 
 The full design is in [`docs/architecture.md`](docs/architecture.md).
 
@@ -288,6 +314,16 @@ Build instructions, the branch model, and the hardware traps worth knowing about
 are in [CONTRIBUTING.md](CONTRIBUTING.md). Bug reports are most useful with the
 UART0 boot log and, for card problems, the output of the `diag` or `scan`
 environment.
+
+## Support
+
+PrintDrop is free and MIT licensed. If it saved you a walk across the workshop,
+you can [sponsor the project](https://github.com/sponsors/Akash97p) or
+[buy me a coffee](https://buymeacoffee.com/akash97p).
+
+<a href="https://github.com/sponsors/Akash97p" target="_blank"><img src="https://img.shields.io/badge/Sponsor%20on%20GitHub-ea4aaa?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="Sponsor on GitHub" height="46"></a>
+&nbsp;
+<a href="https://buymeacoffee.com/akash97p" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="46" width="163"></a>
 
 ## Credits
 
