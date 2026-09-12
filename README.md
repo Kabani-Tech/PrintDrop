@@ -321,12 +321,9 @@ PrintDrop is free and MIT licensed. If it saved you a walk across the workshop,
 you can [sponsor the project](https://github.com/sponsors/Akash97p) or
 [buy me a coffee](https://buymeacoffee.com/akash97p).
 
+<a href="https://github.com/sponsors/Akash97p" target="_blank"><img src="https://img.shields.io/badge/Sponsor%20on%20GitHub-ea4aaa?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="Sponsor on GitHub" height="46"></a>
+&nbsp;
 <a href="https://buymeacoffee.com/akash97p" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="46" width="163"></a>
-
-GitHub strips `<iframe>` from README markdown, so the sponsor card only renders
-on the [project site](https://kabani-tech.github.io/PrintDrop/#support). Here it
-is the badge above, plus the repository's own Sponsor button from
-[`.github/FUNDING.yml`](.github/FUNDING.yml).
 
 ## Credits
 
