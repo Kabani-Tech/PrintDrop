@@ -6,7 +6,7 @@ Reference and background for the firmware. Start with the
 
 | Document | What's in it |
 |---|---|
-| [architecture.md](architecture.md) | How the pieces fit: USB/Wi-Fi arbitration, module layout, partition map, build environments, measured performance |
+| [architecture.md](architecture.md) | How the pieces fit: USB/Wi-Fi arbitration, why the card is offered read-only, how two other projects solved the same problem, module layout, partition map, build environments, measured performance |
 | [hardware.md](hardware.md) | The board as measured, SD wiring, power requirements, verified SPI clocks |
 | [bugs.md](bugs.md) | Every fault found during the port and its root cause — why the code is shaped the way it is |
 | [flashing.md](flashing.md) | Getting this board into download mode, and why it is more awkward than it should be |

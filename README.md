@@ -113,6 +113,13 @@ Write protection removes that rather than narrowing it. **Setting
 `USB_READ_ONLY=0` puts you back in the state described above**, which is only
 reasonable if nothing will write from the host side while PrintDrop is running.
 
+It is also where the other implementations of this idea landed. Espressif's own
+`usb_msc_wireless_disk` example is writable and unarbitrated, and its README
+says *"the demo is only used for function preview"*; ChatterSync, which does
+this for CNC controls and is deployed on real machines, ships read-only by
+default with writing behind a warned-about flag. Both are compared in
+[`docs/architecture.md`](docs/architecture.md#prior-art).
+
 The full design is in [`docs/architecture.md`](docs/architecture.md).
 
 ## Hardware

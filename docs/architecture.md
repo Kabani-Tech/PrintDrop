@@ -31,21 +31,27 @@ it mounted, the host's cached allocation table goes stale and the next write
 from either side corrupts the filesystem. The reverse is also true — the ESP32's
 own FATFS cache goes stale if the host writes sectors underneath it.
 
-`storage.cpp` enforces three rules:
+`storage.cpp` enforces four rules:
 
-**1. One mutex.** Every SD access, from either side, is serialised. The MSC
+**1. The host cannot write.** The card is offered to USB as write-protected
+(`tud_msc_is_writable_cb()` returns false under `USB_READ_ONLY`, on by default).
+A host that cannot write cannot hold dirty filesystem metadata, so its cache can
+only ever be stale, never wrong. Rules 2 to 4 make sharing careful; this one
+makes it safe. See [the limit of this design](#the-limit-of-this-design).
+
+**2. One mutex.** Every SD access, from either side, is serialised. The MSC
 read/write callbacks and the HTTP handlers contend for the same lock.
 
-**2. Withdraw before writing.** Before the ESP32 modifies the card, the media is
+**3. Withdraw before writing.** Before the ESP32 modifies the card, the media is
 withdrawn from the USB host (`msc.mediaPresent(false)`), and re-presented
 afterwards, with UNIT ATTENTION 28h/00 raised in between so the host is told the
 medium may have changed. A host that acts on that drops its cache and re-reads
 the FAT — which is what makes an uploaded file appear in the printer's file list
 without a reboot. A host that does not is the subject of the section below.
 
-**3. Remount when the host writes.** MSC write callbacks set a flag. Before the
+**4. Remount when the host writes.** MSC write callbacks set a flag. Before the
 ESP32 next trusts its own view of the filesystem, it tears down and remounts
-FATFS.
+FATFS. Only reachable with rule 1 turned off.
 
 Any code path that touches the card goes through `storage::Guard`:
 
@@ -57,8 +63,8 @@ if (!g.ok()) return sendError(503, "Card busy");
 
 ### The limit of this design
 
-The three rules above are sufficient against a host that only reads, and
-insufficient against one that writes. This is not an implementation gap that
+Rules 2 to 4 are sufficient against a host that only reads, and insufficient
+against one that writes. Rule 1 exists because of what follows. This is not an implementation gap that
 better arbitration closes: USB mass storage gives the device no way to
 invalidate metadata a host has already cached. Withdrawing the medium is a hint,
 and UNIT ATTENTION is a stronger hint, but a host is free to keep its cached FAT
@@ -76,6 +82,77 @@ it is exposed as `POST /api/usb/reattach` and `reattach` on the serial console.
 The honest boundary: a printer reading jobs from the card is safe. A desktop
 with the volume mounted read-write is not, and the fix there is not to have it
 mounted while PrintDrop writes. Full evidence in [bugs.md](bugs.md).
+
+### Prior art
+
+Two other implementations of this idea exist. Both are evidence that the limit
+above is inherent rather than ours.
+
+**Espressif's [`usb_msc_wireless_disk`](https://github.com/espressif/esp-iot-solution/tree/master/examples/usb/device/usb_msc_wireless_disk)**
+(`esp-iot-solution`, `examples/usb/device/`) is the reference design for this on the ESP32-S2/S3, and
+it does less than PrintDrop does. `tud_msc_is_writable_cb()` returns true
+unconditionally. The MSC callbacks call `disk_read`/`disk_write` directly while
+the HTTP server writes the same mounted FATFS through `fopen`/`fwrite`, with no
+mutex between them. UNIT ATTENTION appears nowhere. Its one coherency mechanism
+is a button the user presses — an HTTP endpoint, `/reset_msc`, that cycles VBUS
+on the device port so the host re-enumerates:
+
+```c
+usbd_vbus_enable(false);
+vTaskDelay(20 / portTICK_PERIOD_MS);
+usbd_vbus_enable(true);
+```
+
+That is `reattachHost()` done in hardware, needing a board with a VBUS switch
+and a human to trigger it. Their README carries the line *"The demo is only used
+for function preview, don't be surprised if you find bug"*. Their eject path has
+the same dead end ours had: once `tud_msc_start_stop_cb()` sets `ejected[lun]`,
+a later load request returns `!ejected[lun]`, and the LUN never comes back
+without the VBUS cycle.
+
+**[ChatterSync](https://github.com/Chatter-Software-Development/ChatterSync)**
+(Chatter Software Development, Apache-2.0) solves the same
+problem for CNC controls with a Raspberry Pi Zero W: `g_mass_storage` exports a
+fixed 2 GB image file, and that image is also mounted at `/mnt/chattersync` and
+served over SFTP. It ships both of our conclusions as defaults:
+
+> By default, the USB volume is "read-only" to the machine. [...] set
+> `READ_ONLY=false` [...] This has not been tested extensively, so use at your
+> own risk.
+
+> When files are updated, the device will disconnect and reconnect from the
+> machine. This is normal behavior.
+
+Read-only by default, writable only behind a flag with a warning attached, and a
+forced re-enumeration on every change — reached independently, and deployed
+across Haas, Fanuc, Hurco, Siemens, Okuma and YCM controls.
+
+Their compatibility list is the best available field data on how hosts react to
+a drive that re-enumerates underneath them: most cope, a minority do not. A
+Syntec control needs the device physically unplugged and replugged because the
+mount/unmount cycle does not take. A Brother B00 freezes its file I/O screen. A
+Datron Neo Series 2 does not work at all.
+
+Two of their findings transfer directly to a printer:
+
+* **A drive that changes under a host is unsafe to stream from.** ChatterSync
+  tells users to copy programs to the machine's memory before running them, and
+  its own TODO says why — *"lock out writing of files that are currently open by
+  the machine and pause unmount/mount cycle so that files can safely be run off
+  of the ChatterSync device"*. A re-enumeration, and to a lesser degree the
+  medium withdrawal of rule 3, pulls the volume out from under a host that is
+  reading from it. This is why `USB_FORCE_REATTACH` defaults to 0. Whether a
+  withdrawal alone survives a print in progress is untested.
+* **The fixed-size image file is the other architecture.** Exporting a blob
+  rather than the raw card confines a confused host's damage to that blob, at
+  the cost of a capacity that cannot change without wiping it. PrintDrop exposes
+  the card directly — simpler, and the full capacity is usable. Write protection
+  is what makes that trade safe.
+
+The three implementations converge. The one that is writable and unarbitrated
+describes itself as a preview; the one deployed in the field is read-only and
+re-enumerates. Rule 1 is the shape of the answer, not a retreat from a better
+one.
 
 ### Not stalling the printer
 
