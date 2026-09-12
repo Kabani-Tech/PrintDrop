@@ -3,11 +3,13 @@ import Link from "next/link"
 import { Separator } from "@/components/ui/separator"
 
 const GITHUB_URL = "https://github.com/Kabani-Tech/PrintDrop"
+const COFFEE_URL = "https://buymeacoffee.com/akash97p"
 
 const FOOTER_LINKS = [
   { href: "/docs/", label: "Docs" },
   { href: "/docs/contributing/", label: "Contributing" },
   { href: GITHUB_URL, label: "Source" },
+  { href: COFFEE_URL, label: "Buy me a coffee" },
 ]
 
 export function SiteFooter() {

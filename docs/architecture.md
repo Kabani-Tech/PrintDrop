@@ -38,9 +38,10 @@ read/write callbacks and the HTTP handlers contend for the same lock.
 
 **2. Withdraw before writing.** Before the ESP32 modifies the card, the media is
 withdrawn from the USB host (`msc.mediaPresent(false)`), and re-presented
-afterwards. The host sees a card removal, drops its cache, and re-reads the FAT
-— which is what makes an uploaded file appear in the printer's file list without
-a reboot.
+afterwards, with UNIT ATTENTION 28h/00 raised in between so the host is told the
+medium may have changed. A host that acts on that drops its cache and re-reads
+the FAT — which is what makes an uploaded file appear in the printer's file list
+without a reboot. A host that does not is the subject of the section below.
 
 **3. Remount when the host writes.** MSC write callbacks set a flag. Before the
 ESP32 next trusts its own view of the filesystem, it tears down and remounts
@@ -53,6 +54,28 @@ storage::Guard g(/*forWrite=*/true);
 if (!g.ok()) return sendError(503, "Card busy");
 // ... card is exclusively ours, and the host cannot see it ...
 ```
+
+### The limit of this design
+
+The three rules above are sufficient against a host that only reads, and
+insufficient against one that writes. This is not an implementation gap that
+better arbitration closes: USB mass storage gives the device no way to
+invalidate metadata a host has already cached. Withdrawing the medium is a hint,
+and UNIT ATTENTION is a stronger hint, but a host is free to keep its cached FAT
+and write it back later — which is what macOS was measured doing, erasing an
+uploaded file and leaving 51 orphaned clusters behind. One upload read back at
+the right size with different contents, because the host had written into
+clusters the device had allocated.
+
+Where a host ignores both hints, `USB_FORCE_REATTACH` makes `refreshHostView()`
+leave the bus entirely (`tud_disconnect()` / `tud_connect()`), which nothing can
+cache through, at the cost of a "disk not ejected properly" complaint from the
+host. The same mechanism is the only way back after a host has ejected the LUN;
+it is exposed as `POST /api/usb/reattach` and `reattach` on the serial console.
+
+The honest boundary: a printer reading jobs from the card is safe. A desktop
+with the volume mounted read-write is not, and the fix there is not to have it
+mounted while PrintDrop writes. Full evidence in [bugs.md](bugs.md).
 
 ### Not stalling the printer
 

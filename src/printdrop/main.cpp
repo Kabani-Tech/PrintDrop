@@ -58,6 +58,7 @@ static void handleCommand(String line) {
         Serial.println("  forget                 clear Wi-Fi settings and reboot");
         Serial.println("  clear-auth             reset web auth to defaults");
         Serial.println("  factory-reset          clear Wi-Fi + auth and reboot");
+        Serial.println("  reattach               drop off USB and come back");
         Serial.println("  reboot                 restart");
         Serial.println("  BOOTLOADER             reboot into flash download mode");
 
@@ -136,6 +137,12 @@ static void handleCommand(String line) {
         auth::clear();
         Serial.println("factory reset — Wi-Fi + auth cleared, restarting");
         delay(300); ESP.restart();
+
+    } else if (cmd == "reattach") {
+        // A host that has ejected the LUN keeps ejecting it, and a reboot does
+        // not help -- only leaving the bus and coming back does.
+        Serial.println("re-attaching to the USB host");
+        storage::reattachHost();
 
     } else if (cmd == "reboot") {
         ESP.restart();
@@ -218,6 +225,7 @@ void setup() {
         Serial.println("[sd] Check CS/MISO/MOSI/CLK against the pins above.");
 #endif
         led::setError(true);
+        Serial.println("[sd] will keep retrying; the drive appears when a card answers.");
     } else {
         // Quick SD OTA check at boot (no block)
         String v;
@@ -240,6 +248,7 @@ void setup() {
 }
 
 void loop() {
+    storage::poll();
     web::loop();
     net::loop();
     led::loop();
