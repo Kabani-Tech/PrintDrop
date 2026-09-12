@@ -329,5 +329,4 @@ you can [sponsor the project](https://github.com/sponsors/Akash97p) or
 
 Made by Akash P | CTO, [Kabani Tech Private Limited](https://kabanitech.com)
 
-MIT licensed — see [LICENSE](LICENSE). The USB mass storage layer derives from
-the `Esp32-USB-Stick` project for the M5Stack Cardputer.
+MIT licensed — see [LICENSE](LICENSE).
