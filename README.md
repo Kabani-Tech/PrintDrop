@@ -17,6 +17,7 @@ Drop a print job from your desk instead of walking a USB stick to the machine.
 [![Status](https://img.shields.io/badge/status-working%20on%20hardware-brightgreen)](docs/)
 [![Issues](https://img.shields.io/github/issues/Akash97p/PrintDrop)](https://github.com/Akash97p/PrintDrop/issues)
 [![Last commit](https://img.shields.io/github/last-commit/Akash97p/PrintDrop)](https://github.com/Akash97p/PrintDrop/commits)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/akash97p)
 
 </div>
 
@@ -312,6 +313,13 @@ Build instructions, the branch model, and the hardware traps worth knowing about
 are in [CONTRIBUTING.md](CONTRIBUTING.md). Bug reports are most useful with the
 UART0 boot log and, for card problems, the output of the `diag` or `scan`
 environment.
+
+## Support
+
+PrintDrop is free and MIT licensed. If it saved you a walk across the workshop,
+you can [buy me a coffee](https://buymeacoffee.com/akash97p).
+
+<a href="https://buymeacoffee.com/akash97p" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="46" width="163"></a>
 
 ## Credits
 

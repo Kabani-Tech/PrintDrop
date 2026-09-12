@@ -3,7 +3,7 @@
 import { useState } from "react"
 import Image from "next/image"
 import Link from "next/link"
-import { GitBranch, Menu } from "lucide-react"
+import { Coffee, GitBranch, Menu } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/sheet"
 
 const GITHUB_URL = "https://github.com/Kabani-Tech/PrintDrop"
+const COFFEE_URL = "https://buymeacoffee.com/akash97p"
 
 const NAV_LINKS = [
   { href: "/#why", label: "Why" },
@@ -73,6 +74,13 @@ export function SiteHeader() {
             </a>
           </Button>
 
+          <Button variant="ghost" size="sm" asChild className="hidden sm:inline-flex">
+            <a href={COFFEE_URL} target="_blank" rel="noopener">
+              <Coffee data-icon-inline />
+              Buy me a coffee
+            </a>
+          </Button>
+
           <Sheet open={open} onOpenChange={setOpen}>
             <SheetTrigger asChild>
               <Button
@@ -111,11 +119,17 @@ export function SiteHeader() {
                   </SheetClose>
                 ))}
               </nav>
-              <div className="mt-auto p-4">
+              <div className="mt-auto flex flex-col gap-2 p-4">
                 <Button variant="outline" asChild className="w-full">
                   <a href={GITHUB_URL} target="_blank" rel="noopener">
                     <GitBranch />
                     View on GitHub
+                  </a>
+                </Button>
+                <Button variant="ghost" asChild className="w-full">
+                  <a href={COFFEE_URL} target="_blank" rel="noopener">
+                    <Coffee />
+                    Buy me a coffee
                   </a>
                 </Button>
               </div>
