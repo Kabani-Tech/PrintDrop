@@ -3,6 +3,7 @@ import {
   Activity,
   ArrowRight,
   Cable,
+  Coffee,
   Cpu,
   FileText,
   Globe,
@@ -29,6 +30,7 @@ import {
 import { Separator } from "@/components/ui/separator"
 
 const GITHUB_URL = "https://github.com/Kabani-Tech/PrintDrop"
+const COFFEE_URL = "https://buymeacoffee.com/akash97p"
 
 const STATS = [
   { value: "1 016", label: "KB/s read over USB — measured" },
@@ -584,6 +586,35 @@ export default function Home() {
             </Button>
           </CardContent>
         </Card>
+      </section>
+
+      <section id="support" className="mx-auto max-w-7xl px-4 pb-16 sm:px-6">
+        <div className="flex flex-col items-center gap-6 text-center">
+          <div className="max-w-2xl">
+            <h2 className="text-2xl tracking-[-0.03em] sm:text-3xl">Support PrintDrop</h2>
+            <p className="mt-3 text-muted-foreground">
+              PrintDrop is free and MIT licensed, built and tested on hardware
+              bought for the purpose. Sponsorship pays for the next printer it
+              gets tested against.
+            </p>
+          </div>
+          {/* GitHub serves these from its own origin, so the card renders even
+              though the site is static. width:100% keeps the 600px card inside
+              a phone screen. */}
+          <iframe
+            src="https://github.com/sponsors/Akash97p/card"
+            title="Sponsor Akash97p"
+            height={225}
+            className="w-full max-w-[600px] rounded-lg border-0"
+            loading="lazy"
+          />
+          <Button variant="outline" asChild>
+            <a href={COFFEE_URL} target="_blank" rel="noopener">
+              <Coffee data-icon-inline />
+              Buy me a coffee
+            </a>
+          </Button>
+        </div>
       </section>
     </>
   )

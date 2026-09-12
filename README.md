@@ -17,6 +17,7 @@ Drop a print job from your desk instead of walking a USB stick to the machine.
 [![Status](https://img.shields.io/badge/status-working%20on%20hardware-brightgreen)](docs/)
 [![Issues](https://img.shields.io/github/issues/Akash97p/PrintDrop)](https://github.com/Akash97p/PrintDrop/issues)
 [![Last commit](https://img.shields.io/github/last-commit/Akash97p/PrintDrop)](https://github.com/Akash97p/PrintDrop/commits)
+[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-db61a2?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/Akash97p)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/akash97p)
 
 </div>
@@ -317,9 +318,15 @@ environment.
 ## Support
 
 PrintDrop is free and MIT licensed. If it saved you a walk across the workshop,
-you can [buy me a coffee](https://buymeacoffee.com/akash97p).
+you can [sponsor the project](https://github.com/sponsors/Akash97p) or
+[buy me a coffee](https://buymeacoffee.com/akash97p).
 
 <a href="https://buymeacoffee.com/akash97p" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="46" width="163"></a>
+
+GitHub strips `<iframe>` from README markdown, so the sponsor card only renders
+on the [project site](https://kabani-tech.github.io/PrintDrop/#support). Here it
+is the badge above, plus the repository's own Sponsor button from
+[`.github/FUNDING.yml`](.github/FUNDING.yml).
 
 ## Credits
 
